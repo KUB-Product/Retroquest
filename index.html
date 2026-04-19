@@ -1272,9 +1272,14 @@ function registerRoomSocketListeners(roomId){
   const s=getSocket();
 
   s.on('player_joined', p=>{
-    if(!G.players.find(x=>x.id===p.id)){
-      G.players.push({...p, isHost:p.is_team_lead, isBot:p.is_bot});
-      renderLobby();
+    // Skip if it's ourselves
+    if(p.id === G.me.id) return;
+    // Skip if already in list (by DB id)
+    if(G.players.find(x=>x.id===p.id)) return;
+    G.players.push({...p, isHost:p.is_team_lead, isBot:p.is_bot});
+    renderLobby();
+    if(G.isHost){
+      toast(`${p.anon_handle} joined the room!`);
     }
   });
   s.on('player_left', ({player_id})=>{
@@ -1395,7 +1400,17 @@ function goCreate(){
   show('s-roomsetup');
   qbRender();
 }
-function goJoin(){renderAvGrid('join-av-grid');show('s-joinsetup')}
+function goJoin(){
+  renderAvGrid('join-av-grid');
+  show('s-joinsetup');
+  // Pre-fill room code if coming from an invite link
+  if(G._autoJoinCode){
+    setTimeout(()=>{
+      const inp=document.getElementById('join-code');
+      if(inp){ inp.value=G._autoJoinCode; G._autoJoinCode=null; }
+    },50);
+  }
+}
 
 function renderAvGrid(gid){
   document.getElementById(gid).innerHTML=AVATARS.map(a=>
@@ -1546,7 +1561,7 @@ function renderLobby(){
     <div class="p-row">
       <div class="p-av">${p.avatar}</div>
       <div style="flex:1">
-        <div class="p-name">${p.name}${p.id===G.me.id?' <span style="font-size:10px;color:var(--mt)">(you)</span>':''}</div>
+        <div class="p-name">${p.name||p.anon_handle||'Player'}${p.id===G.me.id?' <span style="font-size:10px;color:var(--mt)">(you)</span>':''}</div>
         <div class="muted">${p.isBot?'Bot Player':'Online'}</div>
       </div>
       ${p.isHost?'<span class="p-tag tag-host">LEAD</span>':''}
@@ -2737,6 +2752,27 @@ function launchConfetti(){
 // ═══════════════════════════════════════════
 renderAvGrid('host-av-grid');
 loadAdminSessions().catch(()=>{});
+
+// ── Auto-join from invite link /join/ROOMCODE ─────────────
+(function checkInviteUrl(){
+  const path = window.location.pathname; // e.g. /join/67LXHZ
+  const m = path.match(/\/join\/([A-Z0-9]{4,8})/i);
+  if(!m) return;
+  const code = m[1].toUpperCase();
+  // Pre-fill the join code and open the player setup screen
+  // Wait for DOM to be ready
+  setTimeout(()=>{
+    // Store code so goJoin can use it
+    G._autoJoinCode = code;
+    // Show player setup directly (skip home screen enter animation)
+    goJoin();
+    // Pre-fill the room code input
+    const inp = document.getElementById('join-code');
+    if(inp) inp.value = code;
+    // Clear the URL so refreshing doesn't re-trigger
+    history.replaceState(null,'', '/');
+  }, 100);
+})();
 </script>
 </body>
 </html>
