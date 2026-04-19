@@ -621,7 +621,7 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
   <div class="center">
     <div class="badge bdg-y">🎮 Team Retrospective Game</div>
     <div class="logo">Retro<br>Quest</div>
-    <p class="sub">Earn XP, buy power-ups, and make sprint retros actually worth showing up for.</p>
+    <p class="sub">Earn XP and make sprint retros actually worth showing up for.</p>
     <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center">
       <button class="btn btn-y" onclick="goCreate()">⚡ Create Room</button>
       <button class="btn btn-out" onclick="goJoin()">🔗 Join Room</button>
@@ -638,20 +638,18 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
         <div class="muted" style="margin-top:1px">Leaderboard</div>
       </div>
     </div>
-    <button class="btn btn-ghost btn-sm" onclick="goAdmin()" style="font-size:11px;opacity:.55">🔐 Admin</button>
     <div style="display:flex;gap:14px;flex-wrap:wrap;justify-content:center">
       <span class="muted">Up to 20 players</span><span class="muted">·</span>
       <span class="muted">30–60 min</span><span class="muted">·</span>
       <span class="muted">No signup</span>
     </div>
+    <button class="btn btn-ghost btn-sm" onclick="goAdmin()" style="font-size:11px;opacity:.55">🔐 Admin</button>
   </div>
 </div>
 
 <!-- ═══════════════ ADMIN DASHBOARD ═══════════════ -->
 <div class="screen" id="s-admin">
   <div class="w960" style="display:flex;flex-direction:column;align-items:center;gap:14px;padding-top:16px">
-
-    <!-- Top bar -->
     <div class="top-bar w960">
       <div style="display:flex;align-items:center;gap:10px">
         <div class="logo-sm">RetroQuest</div>
@@ -662,13 +660,10 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
         <button class="btn btn-out btn-sm" onclick="show('s-home')">← Exit</button>
       </div>
     </div>
-
     <div class="round-pill w960">
       <div class="round-dot" style="background:var(--b)"></div>
       <span style="font-family:'Syne',sans-serif;font-weight:700;font-size:12px">All Retrospective Sessions</span>
     </div>
-
-    <!-- Filters -->
     <div class="adm-filters w960">
       <input class="adm-search" id="adm-search" placeholder="Search rooms, cards, players…" oninput="admRender()">
       <button class="adm-tab active" onclick="admSetTab(this,'all')">All</button>
@@ -676,15 +671,12 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
       <button class="adm-tab" onclick="admSetTab(this,'completed')">Completed</button>
       <button class="btn btn-b btn-sm" onclick="admExportAll()">📋 Export All</button>
     </div>
-
-    <!-- Room cards -->
     <div class="adm-grid w960" id="adm-grid">
       <div class="adm-empty">No sessions yet. Sessions appear here after a game is completed.</div>
     </div>
   </div>
 </div>
 
-<!-- PIN overlay -->
 <div class="pin-overlay" id="pin-overlay" style="display:none">
   <div class="pin-box">
     <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:20px;margin-bottom:6px">Admin Access</div>
@@ -708,7 +700,7 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
       <button class="pin-btn" onclick="pinBack()" style="font-size:13px">⌫</button>
     </div>
     <button class="btn btn-out btn-sm btn-full" onclick="closePinOverlay()">Cancel</button>
-    <div class="muted" style="font-size:11px;margin-top:10px">Default PIN: 1234 — change it in Settings</div>
+    <div class="muted" style="font-size:11px;margin-top:10px">Default PIN: 1234</div>
   </div>
 </div>
 
@@ -719,20 +711,6 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
       <div class="badge bdg-y" style="margin-bottom:10px">Room Configuration</div>
       <h2>Configure your room</h2>
       <p class="sub" style="margin-top:6px">Set up the game rules before players join.</p>
-    </div>
-
-    <!-- Bot toggle -->
-    <div class="card" style="width:100%">
-      <div class="toggle-row">
-        <div class="toggle-label">
-          <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:14px">🤖 Allow Bot Players</div>
-          <div class="muted">Auto-add bots when fewer than 4 humans join</div>
-        </div>
-        <label class="toggle">
-          <input type="checkbox" id="cfg-bots" checked>
-          <div class="toggle-track"><div class="toggle-thumb"></div></div>
-        </label>
-      </div>
     </div>
 
     <!-- Player join toggle -->
@@ -1685,7 +1663,6 @@ function updateJoinLabel(){
 //  ROOM CREATION
 // ═══════════════════════════════════════════
 async function createRoom(){
-  CFG.botsEnabled=document.getElementById('cfg-bots').checked;
   CFG.roomOpen=document.getElementById('cfg-open').checked;
   CFG.iceTimerSecs=parseInt(document.getElementById('cfg-ice-t').value);
   CFG.retroSubmitSecs=parseInt(document.getElementById('cfg-retro-s').value);
@@ -1773,7 +1750,6 @@ async function joinRoom(){
     G.room=room.code; G.roomId=room.id;
 
     // ✅ Use server room config
-    CFG.botsEnabled    = room.cfg_bots_enabled ?? false;
     CFG.roomOpen       = room.cfg_room_open    ?? true;
     CFG.iceTimerSecs   = room.cfg_ice_timer_secs   ?? 10;
     CFG.retroSubmitSecs= room.cfg_retro_submit_secs?? 90;
