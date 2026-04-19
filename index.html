@@ -1279,17 +1279,41 @@ let currentScreen='s-home';
 // ═══════════════════════════════════════════
 function registerRoomSocketListeners(roomId){
   const s=getSocket();
+  // ✅ Remove any existing listeners first to prevent duplicates on reconnect
+  ['player_joined','lead_set','player_left','host_transferred','game_started',
+   'phase_changed','retro_phase_changed','ice_answered','cards_revealed',
+   'card_voted','card_discussed','card_duplicate','card_commented','card_moved',
+   'chat_message','review_navigate','timer_updated','room_locked','room_unlocked',
+   'game_ended'].forEach(e=>s.off(e));
 
   s.on('player_joined', p=>{
     // Skip if it's ourselves
     if(p.id === G.me.id) return;
     // Skip if already in list (by DB id)
     if(G.players.find(x=>x.id===p.id)) return;
-    G.players.push({...p, isHost:p.is_team_lead, isBot:p.is_bot});
+    G.players.push({
+      ...p,
+      name: p.anon_handle||'Player',
+      isHost: p.is_team_lead||false,
+      isBot: p.is_bot||false,
+    });
     renderLobby();
+    updateLeadIndicator();
     if(G.isHost){
       toast(`${p.anon_handle} joined the room!`);
     }
+  });
+  // ✅ Backend confirmed who is team lead — sync all clients
+  s.on('lead_set', ({player_id})=>{
+    G.players.forEach(p=>{ p.isHost=(p.id===player_id); });
+    // If we are the new lead
+    if(player_id===G.me.id && !G.isHost){
+      G.isHost=true;
+      document.getElementById('start-btn').style.display='block';
+      document.getElementById('lobby-lock-wrap').style.display='block';
+    }
+    renderLobby();
+    updateLeadIndicator();
   });
   s.on('player_left', ({player_id})=>{
     // Check if leaving player was host BEFORE removing from list
@@ -1332,27 +1356,32 @@ function registerRoomSocketListeners(roomId){
     G.ice.answeredCount++;
     G.ice.playerPicks[player_id]=chosen_idx;
     if(xp_earned>0) G.ice.scores[player_id]=(G.ice.scores[player_id]||0)+xp_earned;
-    const total=G.players.length;
+    const humanTotal=G.players.filter(p=>!p.isBot).length;
     document.getElementById('ice-answered-lbl').textContent=
-      `${G.ice.answeredCount} / ${total} answered`;
-    // If all players answered, reveal results early
-    if(G.ice.answeredCount>=total&&G.ice.answered){
+      `${G.ice.answeredCount} / ${humanTotal} answered`;
+    // If all human players answered, reveal results early
+    if(G.ice.answeredCount>=humanTotal&&G.ice.answered){
       clearInterval(G.ice.iv);setTimeout(revealResults,400);
     }
   });
   s.on('cards_revealed', ({cards})=>{
-    // Merge server cards into local state during vote reveal
+    // Rebuild cards from server — preserve myVotes by dbId
     G.retro.cards=[[],[],[]];
     cards.forEach(c=>{
       const ci=['went_well','improve','not_sure'].indexOf(c.col);
-      if(ci>=0) G.retro.cards[ci].push({
-        id:G.retro.nextId++, dbId:c.id,
-        txt:c.content, pid:c.player_id,
-        pname:c.players?.anon_handle??'Unknown',
-        pav:c.players?.avatar??'🦄',
-        votes:c.vote_count??0, isMe:c.player_id===G.me.id,
-        spotlight:c.is_spotlight??false,
-      });
+      if(ci>=0){
+        const localId=G.retro.nextId++;
+        // Re-add dbId to myVotes so vote dedup still works
+        if(G.retro.myVotes.has(c.id)) G.retro.myVotes.add(localId);
+        G.retro.cards[ci].push({
+          id:localId, dbId:c.id,
+          txt:c.content, pid:c.player_id,
+          pname:c.players?.anon_handle??'Unknown',
+          pav:c.players?.avatar??'🦄',
+          votes:c.vote_count??0, isMe:c.player_id===G.me.id,
+          spotlight:c.is_spotlight??false,
+        });
+      }
     });
     for(let i=0;i<3;i++)renderCol(i);
   });
@@ -1362,10 +1391,13 @@ function registerRoomSocketListeners(roomId){
     });
     for(let i=0;i<3;i++)renderCol(i);
   });
-  s.on('card_discussed', ({card_id})=>{
+  s.on('card_discussed', ({card_id, is_discussed})=>{
     const qi=REV.queue.findIndex(e=>e.card.dbId===card_id);
-    if(qi>=0) REV.discussed.add(REV.queue[qi].card.id);
-    renderRevQueue();
+    if(qi>=0){
+      if(is_discussed!==false) REV.discussed.add(REV.queue[qi].card.id);
+      else REV.discussed.delete(REV.queue[qi].card.id);
+    }
+    if(currentScreen==='s-review'){ renderRevQueue(); renderRevCard(); }
   });
   s.on('card_duplicate', ({card_id, is_duplicate})=>{
     const qi=REV.queue.findIndex(e=>e.card.dbId===card_id);
@@ -1418,6 +1450,21 @@ function registerRoomSocketListeners(roomId){
   s.on('game_ended',    ()=>{ if(currentScreen!=='s-results') showResults(); });
 }
 
+
+// ═══════════════════════════════════════════
+//  SESSION TOKEN (refresh dedup)
+// ═══════════════════════════════════════════
+// One token per room per browser — survives refresh, cleared on Leave/Play Again
+function getRoomSessionToken(roomCode){
+  const key='rq_st_'+roomCode;
+  let token=sessionStorage.getItem(key);
+  if(!token){ token=Math.random().toString(36).slice(2)+Date.now().toString(36); sessionStorage.setItem(key,token); }
+  return token;
+}
+function clearRoomSessionToken(roomCode){
+  if(roomCode) sessionStorage.removeItem('rq_st_'+roomCode);
+}
+
 // ═══════════════════════════════════════════
 //  URL — pushState sync
 // ═══════════════════════════════════════════
@@ -1442,13 +1489,13 @@ function leaveRoom(){
     try{ getSocket().emit('player_left_voluntary',{ room_id:G.roomId, player_id:G.me.id }); }catch(e){}
   }
   // Reset state
+  clearRoomSessionToken(G.room);
   G.room=''; G.roomId=''; G.isHost=false;
   G.players=[]; G.chat=[];
   G.retro={phase:'submit',timer:90,iv:null,cards:[[],[],[]],nextId:0,myVotes:new Set()};
   G.ice={qIdx:0,timer:10,iv:null,answered:false,myPick:-1,scores:{},
          answerCounts:[0,0,0,0],answeredCount:0,_resultsShown:false,playerPicks:{}};
   clearInterval(G.retro.iv); clearInterval(G.ice.iv);
-  // Clear URL
   syncUrl('/');
   show('s-home');
 }
@@ -1605,8 +1652,9 @@ async function createRoom(){
     G.room=room.code;G.roomId=room.id;
 
     // Join as Team Lead
+    const sessionToken=getRoomSessionToken(room.code);
     const { player } = await api.post(`/api/rooms/${room.id}/join`,{
-      avatar: G.me.avatar, is_bot: false,
+      avatar: G.me.avatar, is_bot: false, session_token: sessionToken,
     });
     // Promote to team lead
     await supabaseUpdateLead(room.id, player.id);
@@ -1662,7 +1710,8 @@ async function joinRoom(){
     CFG.retroSubmitSecs= room.cfg_retro_submit_secs?? 90;
     CFG.retroVoteSecs  = room.cfg_retro_vote_secs  ?? 60;
 
-    const { player } = await api.post(`/api/rooms/${room.id}/join`,{ avatar: G.me.avatar, is_bot: false });
+    const sessionToken=getRoomSessionToken(room.code);
+    const { player } = await api.post(`/api/rooms/${room.id}/join`,{ avatar: G.me.avatar, is_bot: false, session_token: sessionToken });
     G.me.id=player.id;
     // ✅ Sync local name with DB handle
     G.me.name=player.anon_handle||G.me.name;
@@ -1672,9 +1721,12 @@ async function joinRoom(){
     G.players=players.map(p=>({
       ...p,
       name: p.anon_handle||p.name||'Player',
-      isHost:p.is_team_lead,
-      isBot:p.is_bot,
+      isHost: p.is_team_lead===true,
+      isBot: p.is_bot===true,
     }));
+    // Detect if we are host (our player record has is_team_lead=true)
+    const myRecord=G.players.find(p=>p.id===player.id);
+    if(myRecord?.isHost) G.isHost=true;
     G.ice.scores[G.me.id]=0;
 
     // ✅ Sync URL
@@ -1908,9 +1960,10 @@ function loadQ(){
   renderIceSc();
   startIceTimer();
 
-  // Schedule bot answers — each bot picks an option independently
-  const totalPlayers=G.players.length;
-  G.players.filter(p=>p.id!==G.me.id).forEach(bot=>{
+  // Schedule bot answers — only for actual bots, only by host
+  const totalPlayers=G.players.filter(p=>!p.isBot).length;
+  if(G.isHost){
+    G.players.filter(p=>p.isBot).forEach(bot=>{
     const ok=Math.random()<.65;
     const botIdx=ok?q.correct:(q.correct+1+Math.floor(Math.random()*3))%q.opts.length;
     const delay=1500+Math.random()*(CFG.iceTimerSecs*900);
@@ -1924,12 +1977,13 @@ function loadQ(){
       document.getElementById('ice-answered-lbl').textContent=
         `${G.ice.answeredCount+(G.ice.answered?1:0)} / ${totalPlayers} answered`;
       // If all bots + player answered early, reveal results
-      if(G.ice.answered && G.ice.answeredCount>=G.players.filter(p=>p.id!==G.me.id).length){
+      if(G.ice.answered && G.ice.answeredCount>=G.players.filter(p=>p.isBot).length){
         clearInterval(G.ice.iv);
         revealResults();
       }
     },delay);
   });
+  } // end if(G.isHost)
 }
 
 function startIceTimer(){
@@ -2158,8 +2212,9 @@ function updRetroTmr(t,max){
   document.getElementById('retro-ring').style.stroke=G.retro.phase==='submit'?'var(--g)':'var(--b)';
 }
 function scheduleBotCards(){
+  if(!G.isHost)return; // only host schedules bot cards
   let d=3500;
-  G.players.filter(p=>p.id!==G.me.id).forEach(bot=>{
+  G.players.filter(p=>p.isBot).forEach(bot=>{ // only real bots
     const n=1+Math.floor(Math.random()*2);
     for(let c=0;c<n;c++){
       const col=Math.floor(Math.random()*3);
@@ -2278,7 +2333,11 @@ function moveCard(cardId,fromCol,toCol){
 function voteCard(cid,ci){
   if(G.retro.myVotes.has(cid))return;
   const card=G.retro.cards[ci].find(c=>c.id===cid);if(!card)return;
-  card.votes++;G.retro.myVotes.add(cid);earnXP(5,'retro');renderCol(ci);
+  // Track by dbId if available (survives cards_revealed resync), fallback to local id
+  const voteKey=card.dbId||cid;
+  if(G.retro.myVotes.has(voteKey))return;
+  card.votes++;G.retro.myVotes.add(cid);G.retro.myVotes.add(voteKey);
+  earnXP(5,'retro');renderCol(ci);
   if(G.roomId&&card.dbId){
     api.post(`/api/cards/${card.dbId}/vote`,{ room_id:G.roomId, voter_id:G.me.id })
       .catch(e=>console.warn('Vote sync:', e.message));
@@ -2305,8 +2364,8 @@ function toVote(){
 }
 function endRetro(){
   toast('Voting done! Starting Card Review…');
-  // ✅ Emit phase change to review
-  if(G.roomId){
+  // ✅ Only host emits — participant timer also fires endRetro but should not re-emit
+  if(G.roomId&&G.isHost){
     const s=getSocket();
     s.emit('phase_change',{ room_id:G.roomId, phase:'review' });
   }
@@ -2635,8 +2694,12 @@ function syncXPChips(){
 //  RESULTS
 // ═══════════════════════════════════════════
 function showResults(){
-  G.players.forEach(p=>{if(p.id!==G.me.id)p.xp+=Math.floor(Math.random()*80)+20});
-  G.players.find(p=>p.id===G.me.id).xp=G.me.xp;
+  // Use real XP from ice scores (accumulated throughout game)
+  G.players.forEach(p=>{
+    if(p.id===G.me.id) p.xp=G.me.xp;
+    else if(G.ice.scores[p.id]!==undefined) p.xp=G.ice.scores[p.id];
+    // else keep whatever xp they already have (synced via socket)
+  });
 
   const total=G.retro.cards.flat().length;
   const pos=G.retro.cards[0].length;
