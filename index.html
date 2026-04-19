@@ -1279,6 +1279,11 @@ function registerRoomSocketListeners(roomId){
     }
     renderLobby();
     updateLeadIndicator();
+    // Update start button based on new host status
+    const sb=document.getElementById('start-btn');
+    if(sb) sb.style.display=G.isHost?'block':'none';
+    const lw=document.getElementById('lobby-lock-wrap');
+    if(lw) lw.style.display=G.isHost?'block':'none';
   });
   s.on('player_left', ({player_id})=>{
     // Check if leaving player was host BEFORE removing from list
@@ -1520,6 +1525,11 @@ function leaveRoom(){
   }
   // Reset state
   clearRoomSessionToken(G.room);
+  // Reset DOM state that persists between sessions
+  const sb=document.getElementById('start-btn');
+  if(sb) sb.style.display='none';
+  const lw=document.getElementById('lobby-lock-wrap');
+  if(lw) lw.style.display='none';
   G.room=''; G.roomId=''; G.isHost=false;
   G.players=[]; G.chat=[];
   G.retro={phase:'submit',timer:90,iv:null,cards:[[],[],[]],nextId:0,myVotes:new Set()};
@@ -1569,14 +1579,14 @@ function transferHostIfNeeded(leftPlayerId){
   // ถ้าเราคือคนที่ได้เป็น host คนใหม่
   if(newLead.id===G.me.id){
     G.isHost=true;
-    // แสดง host panel
+    // Update DOM immediately for new host
     const screens=['s-ice','s-retro','s-review'];
     if(screens.includes(currentScreen)){
       document.getElementById('host-panel').classList.remove('hidden');
     }
-    // แสดง start button ถ้ายังอยู่ใน lobby
     if(currentScreen==='s-lobby'){
       document.getElementById('start-btn').style.display='block';
+      document.getElementById('lobby-lock-wrap').style.display='block';
       document.getElementById('lobby-lock-wrap').style.display='block';
     }
     // แจ้ง backend ว่า player นี้เป็น lead ใหม่
@@ -1888,8 +1898,8 @@ function initLobby(skipBots=false){
   document.getElementById('lobby-code').textContent=G.room;
   const link=`${window.location.origin}/join/${G.room}`;
   document.getElementById('invite-link-display').textContent=link;
+  document.getElementById('start-btn').style.display=G.isHost?'block':'none';
   document.getElementById('lobby-lock-wrap').style.display=G.isHost?'block':'none';
-  if(G.isHost)document.getElementById('start-btn').style.display='block';
   renderLobby();show('s-lobby');
   updateLockUI();
 
@@ -1980,7 +1990,7 @@ function addChatMsg(avatar,handle,text,isHost){
 }
 
 function startGame(){
-  // ✅ Emit to backend so all participants move together
+  if(!G.isHost){ toast('Only the Team Lead can start the game'); return; }
   if(G.roomId){
     const s=getSocket();
     s.emit('phase_change',{ room_id:G.roomId, phase:'ice' });
