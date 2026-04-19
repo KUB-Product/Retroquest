@@ -1290,13 +1290,31 @@ function registerRoomSocketListeners(roomId){
     if(currentScreen==='s-lobby'){show('s-ice');setTimeout(startIce,350);}
   });
   s.on('phase_changed', ({phase})=>{
-    if(phase==='retro'&&currentScreen!=='s-retro')startRetro();
-    else if(phase==='review'&&currentScreen!=='s-review')startReview();
+    if(phase==='ice'&&currentScreen==='s-lobby'&&!G.isHost){show('s-ice');setTimeout(startIce,350);}
+    else if(phase==='retro'&&currentScreen!=='s-retro'&&!G.isHost)startRetro();
+    else if(phase==='review'&&currentScreen!=='s-review'&&!G.isHost)startReview();
     else if(phase==='results'&&currentScreen!=='s-results')showResults();
   });
   s.on('retro_phase_changed', ({retro_phase})=>{
-    if(retro_phase==='vote'&&G.retro.phase==='submit'){
+    if(retro_phase==='vote'&&G.retro.phase==='submit'&&!G.isHost){
+      // ✅ Guard: only non-host responds — host already transitioned
       clearInterval(G.retro.iv);toVote();
+    }
+  });
+  // ✅ Ice breaker: update answer counts from real players via socket
+  s.on('ice_answered', ({player_id, chosen_idx, xp_earned})=>{
+    if(player_id===G.me.id) return; // skip own echo
+    if(currentScreen!=='s-ice') return;
+    G.ice.answerCounts[chosen_idx]=(G.ice.answerCounts[chosen_idx]||0)+1;
+    G.ice.answeredCount++;
+    G.ice.playerPicks[player_id]=chosen_idx;
+    if(xp_earned>0) G.ice.scores[player_id]=(G.ice.scores[player_id]||0)+xp_earned;
+    const total=G.players.length;
+    document.getElementById('ice-answered-lbl').textContent=
+      `${G.ice.answeredCount} / ${total} answered`;
+    // If all players answered, reveal results early
+    if(G.ice.answeredCount>=total&&G.ice.answered){
+      clearInterval(G.ice.iv);setTimeout(revealResults,400);
     }
   });
   s.on('cards_revealed', ({cards})=>{
@@ -1367,12 +1385,9 @@ function registerRoomSocketListeners(roomId){
     }
   });
   s.on('timer_updated', ({delta_seconds})=>{
-    if(delta_seconds>0){
-      G.ice.timer+=delta_seconds;
-      G.retro.timer+=delta_seconds;
-    }else{
-      G.ice.timer=0;
-      G.retro.timer=0;
+    if(!G.isHost){ // host already updated locally
+      if(delta_seconds<0){ G.ice.timer=0; G.retro.timer=0; }
+      else { G.ice.timer+=delta_seconds; G.retro.timer+=delta_seconds; }
     }
   });
   s.on('room_locked',   ()=>{CFG.roomOpen=false; updateLockUI()});
@@ -1659,7 +1674,14 @@ function addChatMsg(avatar,handle,text,isHost){
   el.scrollTop=el.scrollHeight;
 }
 
-function startGame(){show('s-ice');setTimeout(startIce,350)}
+function startGame(){
+  // ✅ Emit to backend so all participants move together
+  if(G.roomId){
+    const s=getSocket();
+    s.emit('phase_change',{ room_id:G.roomId, phase:'ice' });
+  }
+  show('s-ice');setTimeout(startIce,350);
+}
 
 // ═══════════════════════════════════════════
 //  ICE BREAKER — KAHOOT STYLE
@@ -1673,11 +1695,33 @@ const KAH_OPTS=[
   {shape:'■', cls:'kah-d'},  // D — green
 ];
 
-function startIce(){
+async function startIce(){
   G.ice.qIdx=0;
   G.ice.scores={};
   G.players.forEach(p=>G.ice.scores[p.id]=0);
-  CFG.activeQ=CFG.customQuestions.length>0?CFG.customQuestions:QUESTIONS;
+
+  // ✅ Load questions from backend (with dbId for answer submission)
+  if(G.roomId){
+    try{
+      const { questions } = await api.get(`/api/ice/questions/${G.roomId}`);
+      if(questions?.length){
+        CFG.activeQ=questions.map(q=>({
+          dbId:q.id,
+          q:q.question_text,
+          opts:[q.option_a,q.option_b,q.option_c,q.option_d],
+          correct:q.correct_idx,
+          xp:q.xp_value||100,
+        }));
+      }else{
+        CFG.activeQ=CFG.customQuestions.length>0?CFG.customQuestions:QUESTIONS;
+      }
+    }catch(e){
+      CFG.activeQ=CFG.customQuestions.length>0?CFG.customQuestions:QUESTIONS;
+    }
+  }else{
+    CFG.activeQ=CFG.customQuestions.length>0?CFG.customQuestions:QUESTIONS;
+  }
+
   document.getElementById('ice-total-lbl').textContent=`${CFG.activeQ.length} questions`;
   loadQ();
 }
@@ -1773,34 +1817,37 @@ function ansQ(idx){
   const baseXp=q.xp||100;
   const xp=ok?(baseXp+G.ice.timer*10):0;
 
-  // Record player's pick in the counts
+  // Record player's pick locally
   G.ice.answerCounts[idx]=(G.ice.answerCounts[idx]||0)+1;
   G.ice.answeredCount++;
   G.ice.playerPicks[G.me.id]=idx;
 
-  // Update answered count display
   document.getElementById('ice-answered-lbl').textContent=
     `${G.ice.answeredCount} / ${G.players.length} answered`;
 
-  // Visual: dim unselected options, mark player's pick
+  // Visual feedback
   document.querySelectorAll('.kah-opt').forEach((b,i)=>{
     b.disabled=true;
     if(i!==idx)b.style.opacity='.45';
   });
   document.getElementById(`kah-opt-${idx}`).classList.add('kah-my-pick');
 
-  // Earn XP immediately
   if(xp>0)earnXP(xp,'ice');
 
-  // Wait briefly then reveal full results once timer ends or all bots answered
-  // Check if all bots have answered already
-  const botsAnswered=G.ice.answeredCount-1; // subtract player
-  if(botsAnswered>=G.players.filter(p=>p.id!==G.me.id).length){
+  // ✅ Send answer to backend (saves to DB + broadcasts ice_answered)
+  if(G.roomId&&q.dbId){
+    api.post('/api/ice/answer',{
+      room_id:G.roomId, player_id:G.me.id,
+      question_id:q.dbId, chosen_idx:idx, time_left_sec:G.ice.timer,
+    }).catch(e=>console.warn('ice answer sync:', e.message));
+  }
+
+  // Check if all non-bot players answered
+  const botsAnswered=G.ice.answeredCount-1;
+  if(botsAnswered>=G.players.filter(p=>p.id!==G.me.id&&p.isBot).length){
     setTimeout(revealResults,600);
   }else{
-    // Wait for remaining bots + a grace period, then reveal
-    const remaining=(CFG.iceTimerSecs-0)*1000;
-    const wait=Math.min(remaining, 3000);
+    const wait=Math.min((CFG.iceTimerSecs)*1000, 3000);
     setTimeout(()=>{clearInterval(G.ice.iv);revealResults()},wait);
   }
 }
@@ -1921,6 +1968,11 @@ function endIce(){
   G.players.forEach(p=>{p.xp=G.ice.scores[p.id]||0});
   G.me.xp=G.ice.scores[G.me.id]||0;
   toast('🎉 Ice breaker done!');
+  // ✅ Emit phase change so all participants move to retro
+  if(G.roomId){
+    const s=getSocket();
+    s.emit('phase_change',{ room_id:G.roomId, phase:'retro' });
+  }
   setTimeout(startRetro,1800);
 }
 
@@ -2090,15 +2142,29 @@ function toVote(){
   document.getElementById('submit-area').style.display='none';
   for(let i=0;i<3;i++)renderCol(i);
   toast('🗳️ Voting phase! Click 👍 to upvote cards');
+  // ✅ Only host emits — participants react to socket event
+  if(G.roomId&&G.isHost){
+    const s=getSocket();
+    s.emit('retro_phase_change',{ room_id:G.roomId, retro_phase:'vote' });
+  }
   startRetroTimer(CFG.retroVoteSecs,endRetro);
   setTimeout(()=>{
     const all=G.retro.cards.flat();
-    G.players.filter(p=>p.id!==G.me.id).forEach(bot=>{
+    G.players.filter(p=>p.id!==G.me.id&&p.isBot).forEach(bot=>{
       [...all].sort(()=>Math.random()-.5).slice(0,3).forEach(card=>setTimeout(()=>{card.votes++;for(let i=0;i<3;i++)renderCol(i)},Math.random()*9000));
     });
   },2500);
 }
-function endRetro(){toast('Voting done! Starting Card Review…');setTimeout(startReview,1600)}
+function endRetro(){
+  toast('Voting done! Starting Card Review…');
+  // ✅ Emit phase change to review
+  if(G.roomId){
+    const s=getSocket();
+    s.emit('phase_change',{ room_id:G.roomId, phase:'review' });
+  }
+  setTimeout(startReview,1600);
+}
+
 
 // ═══════════════════════════════════════════
 //  CARD REVIEW PHASE
@@ -2273,10 +2339,20 @@ function revNav(dir){
   if(next<0||next>=REV.queue.length)return;
   REV.idx=next;
   renderRevCard();
+  // ✅ Broadcast navigation to all participants
+  if(G.roomId){
+    const s=getSocket();
+    s.emit('review_navigate',{ room_id:G.roomId, card_index:REV.idx });
+  }
 }
 function revJump(i){
   if(!G.isHost)return;
   REV.idx=i;renderRevCard();
+  // ✅ Broadcast navigation
+  if(G.roomId){
+    const s=getSocket();
+    s.emit('review_navigate',{ room_id:G.roomId, card_index:REV.idx });
+  }
 }
 
 function toggleDiscussed(){
@@ -2285,9 +2361,15 @@ function toggleDiscussed(){
   if(REV.discussed.has(card.id))REV.discussed.delete(card.id);
   else REV.discussed.add(card.id);
   renderRevCard();
-  // Auto-advance to next undiscussed, non-duplicate card
+  // ✅ Sync to backend + broadcast
+  if(G.roomId&&card.dbId){
+    api.post(`/api/cards/${card.dbId}/discussed`,{ room_id:G.roomId, is_discussed:REV.discussed.has(card.id) })
+      .catch(e=>console.warn('discussed sync:', e.message));
+  }
   const nextUndone=REV.queue.findIndex(({card:c},i)=>i>REV.idx&&!REV.discussed.has(c.id)&&!REV.duplicates.has(c.id));
-  if(nextUndone!==-1){setTimeout(()=>{REV.idx=nextUndone;renderRevCard()},400)}
+  if(nextUndone!==-1){setTimeout(()=>{REV.idx=nextUndone;renderRevCard();
+    if(G.roomId){getSocket().emit('review_navigate',{ room_id:G.roomId, card_index:REV.idx });}
+  },400)}
 }
 
 function toggleDuplicate(){
@@ -2298,12 +2380,18 @@ function toggleDuplicate(){
     toast('🔁 Duplicate mark removed');
   }else{
     REV.duplicates.add(card.id);
-    REV.discussed.add(card.id); // also mark as discussed
-    toast('🔁 Card marked as duplicate — will be excluded from Auction');
-    // Auto-advance to next card
+    REV.discussed.add(card.id);
+    toast('🔁 Card marked as duplicate — will be excluded');
     const next=REV.queue.findIndex(({card:c},i)=>i>REV.idx&&!REV.duplicates.has(c.id)&&!REV.discussed.has(c.id));
-    if(next!==-1){setTimeout(()=>{REV.idx=next;renderRevCard()},500)}
-    else{setTimeout(()=>{REV.idx=Math.min(REV.idx+1,REV.queue.length-1);renderRevCard()},500)}
+    if(next!==-1){setTimeout(()=>{REV.idx=next;renderRevCard();
+      if(G.roomId){getSocket().emit('review_navigate',{ room_id:G.roomId, card_index:REV.idx });}
+    },500)}
+    else{setTimeout(()=>{REV.idx=Math.min(REV.idx+1,REV.queue.length-1);renderRevCard();},500)}
+  }
+  // ✅ Sync duplicate to backend
+  if(G.roomId&&card.dbId){
+    api.post(`/api/cards/${card.dbId}/duplicate`,{ room_id:G.roomId, is_duplicate:REV.duplicates.has(card.id) })
+      .catch(e=>console.warn('duplicate sync:', e.message));
   }
   renderRevCard();
 }
@@ -2328,21 +2416,30 @@ function submitRevComment(){
 }
 
 function revMoveCard(cardId,fromCol,toCol){
-  // Move in the retro cards array
   const idx=G.retro.cards[fromCol].findIndex(c=>c.id===cardId);
   if(idx===-1)return;
   const [card]=G.retro.cards[fromCol].splice(idx,1);
   G.retro.cards[toCol].push(card);
-  // Update the queue entry
   const qi=REV.queue.findIndex(e=>e.card.id===cardId);
   if(qi!==-1)REV.queue[qi].ci=toCol;
   toast(`↗ Card moved to ${COLS[toCol].icon} ${COLS[toCol].label}`);
   renderRevCard();
+  // ✅ Sync move to backend + broadcast
+  const colMap=['went_well','improve','not_sure'];
+  if(G.roomId&&card.dbId){
+    api.post(`/api/cards/${card.dbId}/move`,{ room_id:G.roomId, col:colMap[toCol] })
+      .catch(e=>console.warn('move sync:', e.message));
+  }
 }
 
 function endReview(){
   if(!G.isHost)return;
   toast('Review complete! Generating results…');
+  // ✅ Emit so all participants go to results
+  if(G.roomId){
+    const s=getSocket();
+    s.emit('phase_change',{ room_id:G.roomId, phase:'results' });
+  }
   setTimeout(showResults,1200);
 }
 
@@ -2353,10 +2450,14 @@ function addTimer(){
   G.ice.timer=Math.min(G.ice.timer+30,CFG.iceTimerSecs+60);
   G.retro.timer=G.retro.timer+30;
   toast('⏱️ +30 seconds added');
+  // ✅ Broadcast timer change
+  if(G.roomId) getSocket().emit('timer_override',{ room_id:G.roomId, delta_seconds:30 });
 }
 function skipTimer(){
   G.ice.timer=0;G.retro.timer=0;
   toast('⏭ Timer skipped');
+  // ✅ Broadcast skip
+  if(G.roomId) getSocket().emit('timer_override',{ room_id:G.roomId, delta_seconds:-999 });
 }
 function advancePhase(){
   if(currentScreen==='s-ice'){clearInterval(G.ice.iv);endIce()}
