@@ -1586,7 +1586,7 @@ function leaveRoom(){
   G.players=[]; G.chat=[];
   G.retro={phase:'submit',timer:90,iv:null,cards:[[],[],[]],nextId:0,myVotes:new Set()};
   G.ice={qIdx:0,timer:10,iv:null,answered:false,myPick:-1,scores:{},
-         answerCounts:[0,0,0,0],answeredCount:0,_resultsShown:false,_nextQScheduled:false,playerPicks:{}};
+         answerCounts:[0,0,0,0],answeredCount:0,_resultsShown:false,_nextQScheduled:false,_revealFallback:null,playerPicks:{}};
   clearInterval(G.retro.iv); clearInterval(G.ice.iv);
   syncUrl('/');
   show('s-home');
@@ -2132,11 +2132,12 @@ function loadQ(){
 function startIceTimer(){
   clearInterval(G.ice.iv);
   G.ice.timer=CFG.iceTimerSecs;
+  G.ice._revealFallback=null; // clear any previous fallback
   updIceTmr();
   G.ice.iv=setInterval(()=>{
     G.ice.timer--;
     updIceTmr();
-    // ✅ Host broadcasts tick every second — participants sync
+    // Host broadcasts tick every second
     if(G.isHost && G.roomId){
       getSocket().emit('timer_tick',{
         room_id:G.roomId,
@@ -2146,8 +2147,9 @@ function startIceTimer(){
     }
     if(G.ice.timer<=0){
       clearInterval(G.ice.iv);
-      // ✅ Only host triggers reveal — ensures everyone reveals at same time
       if(G.isHost){
+        // ✅ Mark unanswered players (no pick recorded)
+        // G.ice.myPick stays -1 if host didn't answer = 0 XP, counts as missed
         if(G.roomId){
           getSocket().emit('ice_reveal',{
             room_id:G.roomId,
@@ -2158,7 +2160,13 @@ function startIceTimer(){
         }
         revealResults();
       }
-      // Participants wait for ice_reveal socket event (registered in listeners)
+      // Participants: ice_reveal socket will trigger revealResults()
+      // Fallback: if socket doesn't arrive within 3s, reveal locally
+      if(!G.isHost){
+        G.ice._revealFallback=setTimeout(()=>{
+          if(!G.ice._resultsShown) revealResults();
+        }, 3000);
+      }
     }
   },1000);
 }
@@ -2175,7 +2183,7 @@ function ansQ(idx){
   if(G.ice.answered)return;
   G.ice.answered=true;
   G.ice.myPick=idx;
-  clearInterval(G.ice.iv);
+  // ✅ Timer keeps running — host will emit ice_reveal when it hits 0
 
   const q=CFG.activeQ[G.ice.qIdx];
   const ok=idx===q.correct;
@@ -2187,14 +2195,10 @@ function ansQ(idx){
   G.ice.answeredCount++;
   G.ice.playerPicks[G.me.id]=idx;
 
-  // ✅ DON'T clear timer or reveal early — timer continues
-  // Host timer will trigger reveal at exact same time for everyone
-  // Just disable the answer buttons so player can't change answer
-
   document.getElementById('ice-answered-lbl').textContent=
     `${G.ice.answeredCount} / ${G.players.length} answered`;
 
-  // Visual feedback — lock in choice but don't reveal answer yet
+  // Visual: lock in choice, dim others — timer still shows countdown
   document.querySelectorAll('.kah-opt').forEach((b,i)=>{
     b.disabled=true;
     if(i!==idx)b.style.opacity='.45';
@@ -2203,36 +2207,30 @@ function ansQ(idx){
 
   if(xp>0)earnXP(xp,'ice');
 
-  // ✅ Send answer to backend
+  // Send answer to backend
   if(G.roomId&&q.dbId){
     api.post('/api/ice/answer',{
       room_id:G.roomId, player_id:G.me.id,
       question_id:q.dbId, chosen_idx:idx, time_left_sec:G.ice.timer,
     }).catch(e=>console.warn('ice answer sync:', e.message));
   }
-  // No early reveal — wait for host's ice_reveal event
+  // Timer continues — reveal happens when host's timer hits 0
 }
 
 function revealResults(){
   if(G.ice._resultsShown)return;
   G.ice._resultsShown=true;
+  // Clear participant fallback if it was set
+  if(G.ice._revealFallback){ clearTimeout(G.ice._revealFallback); G.ice._revealFallback=null; }
+  clearInterval(G.ice.iv); // ensure timer stopped
 
   const q=CFG.activeQ[G.ice.qIdx];
   const totalVotes=G.ice.answerCounts.reduce((a,b)=>a+b,0)||1;
-  const myPick=G.ice.myPick;
-  const ok=myPick===q.correct;
+  const myPick=G.ice.myPick; // -1 means didn't answer
+  const didAnswer=G.ice.answered && myPick>=0;
+  const ok=didAnswer && myPick===q.correct;
   const baseXp=q.xp||100;
-  const xp=ok&&G.ice.answered?(baseXp+G.ice.timer*10):0;
-
-  // Disable all options + animate bars
-  document.querySelectorAll('.kah-opt').forEach((btn,i)=>{
-    btn.disabled=true;
-    const pct=Math.round((G.ice.answerCounts[i]/totalVotes)*100);
-    if(i===q.correct)btn.classList.add('kah-correct');
-    else if(i===myPick&&myPick!==q.correct)btn.classList.add('kah-wrong');
-    else if(i!==q.correct)btn.style.opacity='.35';
-    setTimeout(()=>{document.getElementById(`kah-bar-${i}`).style.width=pct+'%'},100);
-  });
+  const xp=ok?(baseXp+Math.max(0,G.ice.timer)*10):0;
 
   // Build results panel
   const resultsBars=q.opts.map((opt,i)=>{
@@ -2271,13 +2269,27 @@ function revealResults(){
   const correctPct=Math.round((correctCount/totalVotes)*100);
   const correctLabel=q.opts[q.correct];
 
-  const myResultHtml=G.ice.answered
-    ?`<div class="kah-my-result" style="background:${ok?'rgba(34,192,128,.12)':'rgba(240,80,138,.1)'};color:${ok?'var(--g)':'var(--pk)'}">
-        ${ok?`✓ Correct! +${xp} XP`:`✗ Not this time!`}
+  // ✅ Disable all buttons on reveal (including unanswered case)
+  document.querySelectorAll('.kah-opt').forEach((btn,i)=>{
+    btn.disabled=true;
+    const pct=Math.round((G.ice.answerCounts[i]/totalVotes)*100);
+    if(i===q.correct) btn.classList.add('kah-correct');
+    else if(i===myPick&&!ok) btn.classList.add('kah-wrong');
+    else if(i!==q.correct) btn.style.opacity='.35';
+    setTimeout(()=>{document.getElementById(`kah-bar-${i}`).style.width=pct+'%'},100);
+  });
+
+  const myResultHtml=!didAnswer
+    ?`<div class="kah-my-result" style="background:rgba(107,114,144,.1);color:var(--mt)">
+        ⏱ Time's up — no answer — 0 XP
       </div>`
-    :`<div class="kah-my-result" style="background:rgba(107,114,144,.1);color:var(--mt)">
-        ⏱ Time's up — you didn't answer
-      </div>`;
+    :ok
+      ?`<div class="kah-my-result" style="background:rgba(34,192,128,.12);color:var(--g)">
+          ✓ Correct! +${xp} XP
+        </div>`
+      :`<div class="kah-my-result" style="background:rgba(240,80,138,.1);color:var(--pk)">
+          ✗ Not this time! — 0 XP
+        </div>`;
 
   const panel=document.getElementById('kah-results');
   panel.style.display='block';
@@ -2313,8 +2325,9 @@ function revealResults(){
 function nextQ(){
   G.ice._resultsShown=false;
   G.ice._nextQScheduled=false;
+  // Clear participant fallback
+  if(G.ice._revealFallback){ clearTimeout(G.ice._revealFallback); G.ice._revealFallback=null; }
   G.ice.qIdx++;
-  // ✅ Host broadcasts next question index — participants advance in sync
   if(G.isHost && G.roomId){
     getSocket().emit('ice_next_q',{ room_id:G.roomId, q_idx:G.ice.qIdx });
   }
