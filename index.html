@@ -22,6 +22,7 @@ function getSupa() {
 const supaReady = () => !!getSupa();
 </script>
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
 <script>
 // ── Backend connection config ─────────────────────────────────
 // Change BACKEND_URL to your Railway/Render/Fly.io deployment URL
@@ -669,7 +670,7 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
       <button class="adm-tab active" onclick="admSetTab(this,'all')">All</button>
       <button class="adm-tab" onclick="admSetTab(this,'active')">Active</button>
       <button class="adm-tab" onclick="admSetTab(this,'completed')">Completed</button>
-      <button class="btn btn-b btn-sm" onclick="admExportAll()">📋 Export All</button>
+      <button class="btn btn-b btn-sm" onclick="admExportAll()">📊 Export All Excel</button>
     </div>
     <div class="adm-grid w960" id="adm-grid">
       <div class="adm-empty">No sessions yet. Sessions appear here after a game is completed.</div>
@@ -1111,10 +1112,10 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
     <div id="res-xp-block" style="width:100%"></div>
     <div class="hl-grid w680" id="res-hl"></div>
     <div class="w680"><div class="label" style="margin-bottom:8px">🏆 Final Leaderboard</div><div class="sc-list" id="res-sc"></div></div>
-    <div class="w680"><div class="label" style="margin-bottom:8px">⚡ Sprint Commitments</div><div class="commit-list" id="res-commits"></div></div>
+    <div class="w680"><div class="label" style="margin-bottom:8px">🏆 Most Voted Cards</div><div class="commit-list" id="res-commits"></div></div>
     <div style="display:flex;gap:8px;width:100%;flex-wrap:wrap">
       <button class="btn btn-y" style="flex:1" onclick="playAgain()">▶ Play Again</button>
-      <button class="btn btn-out" style="flex:1" onclick="doExport()">📋 Copy Summary</button>
+      <button class="btn btn-b" style="flex:1" onclick="exportExcel()">📊 Export Excel</button>
     </div>
   </div>
 </div>
@@ -1438,9 +1439,9 @@ function registerRoomSocketListeners(roomId){
   s.on('timer_tick', ({timer, phase, max})=>{
     if(phase==='ice'){
       G.ice.timer = timer;
-      if(max) CFG._iceTimerMax = max;
+      if(max) G.ice._max = max;
       updIceTmr();
-    } else if(phase==='retro'){
+    } else if(phase==='retro_submit'||phase==='retro_vote'){
       G.retro.timer = timer;
       if(max) G.retro._max = max;
       updRetroTmr(timer, max || G.retro._max || CFG.retroSubmitSecs);
@@ -1450,16 +1451,8 @@ function registerRoomSocketListeners(roomId){
   // ✅ Backend says timer ended — ALL clients handle phase transition
   s.on('timer_end', ({phase, reason})=>{
     if(phase==='ice'){
-      // Trigger reveal for everyone
-      if(!G.ice._resultsShown){
-        getSocket().emit('ice_reveal',{
-          room_id:G.roomId,
-          q_idx:G.ice.qIdx,
-          answer_counts:G.ice.answerCounts,
-          player_picks:G.ice.playerPicks,
-        });
-        revealResults();
-      }
+      // Only non-host triggers via timer_end — host already handled via stop_timer_early
+      if(!G.isHost && !G.ice._resultsShown) revealResults();
     } else if(phase==='retro_submit'){
       if(G.retro.phase==='submit') toVote();
     } else if(phase==='retro_vote'){
@@ -1467,8 +1460,9 @@ function registerRoomSocketListeners(roomId){
     }
   });
 
-  // ✅ ice_reveal — sync answer data and reveal
+  // ✅ ice_reveal — participants reveal; host already revealed
   s.on('ice_reveal', ({q_idx, answer_counts, player_picks})=>{
+    if(G.isHost) return; // host triggered this, already revealed
     if(Array.isArray(answer_counts)) G.ice.answerCounts = answer_counts;
     if(player_picks) G.ice.playerPicks = player_picks;
     if(!G.ice._resultsShown) revealResults();
@@ -1476,6 +1470,8 @@ function registerRoomSocketListeners(roomId){
 
   // ✅ Host advances to next question — everyone moves together
   s.on('ice_next_q', ({q_idx})=>{
+    // Only participants advance — host already called nextQ() locally
+    if(G.isHost) return;
     G.ice._resultsShown = false;
     G.ice._nextQScheduled = false;
     G.ice.qIdx = q_idx;
@@ -2159,10 +2155,11 @@ function startIceTimer(){
 
 function updIceTmr(){
   const t=G.ice.timer;
-  const off=145-(t/CFG.iceTimerSecs)*145;
+  const iceMax=G.ice._max||CFG.iceTimerSecs||30;
+  const off=145-(t/iceMax)*145;
   document.getElementById('ice-tnum').textContent=t;
   document.getElementById('ice-ring').style.strokeDashoffset=off;
-  document.getElementById('ice-ring').style.stroke=t>CFG.iceTimerSecs*.35?'var(--y)':'var(--pk)';
+  document.getElementById('ice-ring').style.stroke=t>(iceMax*.35)?'var(--y)':'var(--pk)';
 }
 
 function ansQ(idx){
@@ -2504,16 +2501,32 @@ function moveCard(cardId,fromCol,toCol){
   toast(`↗ Card moved: ${fromName} → ${toName}`);
 }
 function voteCard(cid,ci){
-  if(G.retro.myVotes.has(cid))return;
   const card=G.retro.cards[ci].find(c=>c.id===cid);if(!card)return;
-  // Track by dbId if available (survives cards_revealed resync), fallback to local id
   const voteKey=card.dbId||cid;
-  if(G.retro.myVotes.has(voteKey))return;
-  card.votes++;G.retro.myVotes.add(cid);G.retro.myVotes.add(voteKey);
-  earnXP(5,'retro');renderCol(ci);
-  if(G.roomId&&card.dbId){
-    api.post(`/api/cards/${card.dbId}/vote`,{ room_id:G.roomId, voter_id:G.me.id })
-      .catch(e=>console.warn('Vote sync:', e.message));
+  const isVoted=G.retro.myVotes.has(cid)||G.retro.myVotes.has(voteKey);
+
+  if(isVoted){
+    // ✅ Unvote
+    card.votes=Math.max(0,card.votes-1);
+    G.retro.myVotes.delete(cid);
+    G.retro.myVotes.delete(voteKey);
+    earnXP(-5,'retro'); // take back XP
+    renderCol(ci);
+    if(G.roomId&&card.dbId){
+      api.post(`/api/cards/${card.dbId}/unvote`,{ room_id:G.roomId, voter_id:G.me.id })
+        .catch(e=>console.warn('Unvote sync:', e.message));
+    }
+  } else {
+    // Vote
+    card.votes++;
+    G.retro.myVotes.add(cid);
+    G.retro.myVotes.add(voteKey);
+    earnXP(5,'retro');
+    renderCol(ci);
+    if(G.roomId&&card.dbId){
+      api.post(`/api/cards/${card.dbId}/vote`,{ room_id:G.roomId, voter_id:G.me.id })
+        .catch(e=>console.warn('Vote sync:', e.message));
+    }
   }
 }
 function toVote(){
@@ -2910,8 +2923,59 @@ function showResults(){
 // ═══════════════════════════════════════════
 //  EXPORT & PLAY AGAIN
 // ═══════════════════════════════════════════
+function exportExcel(){
+  if(typeof XLSX === 'undefined'){ toast('Excel library not loaded'); return; }
+  const date = new Date().toLocaleDateString('th-TH');
+  const wb = XLSX.utils.book_new();
+
+  // ── Sheet 1: Cards by Lane ────────────────────────────────
+  const cardsData = [['Lane','Content','Votes','Author','Discussed']];
+  const laneNames = ['Went Well','Improve','Not Sure'];
+  G.retro.cards.forEach((lane,ci)=>{
+    lane.forEach(c=>{
+      cardsData.push([
+        laneNames[ci],
+        c.txt,
+        c.votes||0,
+        c.pname||'',
+        REV.discussed.has(c.id)?'Yes':'No',
+      ]);
+    });
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cardsData), 'Cards');
+
+  // ── Sheet 2: Most Voted ───────────────────────────────────
+  const votedData = [['Rank','Card','Votes','Lane']];
+  const sorted = G.retro.cards.flatMap((lane,ci)=>lane.map(c=>({...c,laneIdx:ci})))
+    .filter(c=>!REV.duplicates.has(c.id))
+    .sort((a,b)=>b.votes-a.votes).slice(0,10);
+  sorted.forEach((c,i)=>{
+    votedData.push([i+1, c.txt, c.votes, laneNames[c.laneIdx]]);
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(votedData), 'Most Voted');
+
+  // ── Sheet 3: Leaderboard ──────────────────────────────────
+  const xpData = [['Rank','Avatar','Name','XP']];
+  [...G.players].sort((a,b)=>b.xp-a.xp).forEach((p,i)=>{
+    xpData.push([i+1, p.avatar, p.name||p.anon_handle, p.xp||0]);
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(xpData), 'Leaderboard');
+
+  // ── Sheet 4: Comments ─────────────────────────────────────
+  const cmtData = [['Card','Comment','By']];
+  G.retro.cards.flat().forEach(c=>{
+    (REV.comments[c.id]||[]).forEach(cm=>{
+      cmtData.push([c.txt, cm.text, cm.handle]);
+    });
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cmtData), 'Comments');
+
+  XLSX.writeFile(wb, `RetroQuest-${G.room}-${date}.xlsx`);
+  toast('📊 Excel exported!');
+}
+
 function doExport(){
-  // Commitments: top-voted cards across all 3 lanes (excluding duplicates)
+  // Legacy clipboard export (kept for backward compat)
   const commits=G.retro.cards.flat()
     .filter(c=>!REV.duplicates.has(c.id))
     .sort((a,b)=>b.votes-a.votes).slice(0,3).map(c=>c.txt);
@@ -2920,13 +2984,9 @@ function doExport(){
     `🚀 WENT WELL\n${G.retro.cards[0].map(c=>`• ${c.txt}`).join('\n')||'(none)'}\n\n`+
     `🔧 IMPROVE\n${G.retro.cards[1].map(c=>`• ${c.txt}`).join('\n')||'(none)'}\n\n`+
     `🤔 NOT SURE\n${G.retro.cards[2].map(c=>`• ${c.txt}`).join('\n')||'(none)'}\n\n`+
-    `⚡ COMMITMENTS\n${commits.map((c,i)=>`${i+1}. ${c}`).join('\n')||'(none)'}\n\n`+
-    `Total XP earned: ${R.totalEarned}\n\n`+
-    `── REVIEW COMMENTS ──\n`+
-    (Object.keys(REV.comments).length
-      ? G.retro.cards.flat().filter(c=>REV.comments[c.id]?.length).map(c=>`"${c.txt}"\n${REV.comments[c.id].map(cm=>`  [${cm.handle}]: ${cm.text}`).join('\n')}`).join('\n\n')
-      : '(none)')
-  ).then(()=>toast('Summary copied! 📋')).catch(()=>{});
+    `🏆 MOST VOTED\n${commits.map((c,i)=>`${i+1}. ${c}`).join('\n')||'(none)'}\n\n`+
+    `Total XP: ${R.totalEarned}`
+  ).then(()=>toast('Summary copied!')).catch(()=>{});
 }
 function playAgain(){
   R.totalEarned=0;
@@ -3217,27 +3277,57 @@ function admRender(){
 
 // ── Export ────────────────────────────────────────────────
 function admExport(roomId){
+  if(typeof XLSX === 'undefined'){ toast('Excel library not loaded'); return; }
   const s=ADM.sessions.find(x=>x.id===roomId);if(!s)return;
-  const lines=[
-    `RetroQuest Admin Export`,
-    `Room: ${s.id} | Date: ${s.date} | Players: ${s.players.length}`,
-    ``,`═ CARDS ═`,
-    ...[0,1,2].map(ci=>{
-      const cards=s.cards.filter(c=>c.col===ci);
-      return[`\n[${['Went Well','Improve','Not Sure'][ci]}]`,...cards.map(c=>`  ${c.isDuplicate?'[DUP] ':''}${c.txt} (👍${c.votes})${c.comments.map(cm=>`\n    💬 ${cm.handle}: ${cm.text}`).join('')}`)].join('\n');
-    }),
-    ``,`═ COMMITMENTS ═`,
-    ...s.commits.map((c,i)=>`${i+1}. ${c}`),
-    ``,`═ LEADERBOARD ═`,
-    ...s.players.map((p,i)=>`${i+1}. ${p.avatar} ${p.name} — ${p.xp} XP`),
-  ];
-  navigator.clipboard.writeText(lines.join('\n')).then(()=>toast('📋 Session exported to clipboard'));
+  const wb=XLSX.utils.book_new();
+  const laneNames=['Went Well','Improve','Not Sure'];
+
+  const cardsData=[['Lane','Content','Votes','Duplicate']];
+  [0,1,2].forEach(ci=>{
+    s.cards.filter(c=>c.col===ci).forEach(c=>{
+      cardsData.push([laneNames[ci],c.txt,c.votes,c.isDuplicate?'Yes':'No']);
+    });
+  });
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(cardsData),'Cards');
+
+  const topData=[['Rank','Card','Votes']];
+  s.commits.forEach((c,i)=>topData.push([i+1,c,'']));
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(topData),'Most Voted');
+
+  const xpData=[['Rank','Avatar','Name','XP']];
+  s.players.forEach((p,i)=>xpData.push([i+1,p.avatar,p.name,p.xp||0]));
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(xpData),'Leaderboard');
+
+  XLSX.writeFile(wb,`RetroQuest-${s.id}-${s.date}.xlsx`);
+  toast('📊 Excel exported!');
 }
 
 function admExportAll(){
   if(!ADM.sessions.length){toast('No sessions to export');return}
-  const all=ADM.sessions.map(s=>`\n${'═'.repeat(40)}\nRoom ${s.id} | ${s.date}\nCards: ${s.totalCards} | Votes: ${s.totalVotes} | Players: ${s.players.length}\n\nCommitments:\n${s.commits.map((c,i)=>`${i+1}. ${c}`).join('\n')||'(none)'}`).join('\n');
-  navigator.clipboard.writeText(`RetroQuest — All Sessions Export\n${all}`).then(()=>toast(`📋 ${ADM.sessions.length} sessions exported`));
+  if(typeof XLSX === 'undefined'){ toast('Excel library not loaded'); return; }
+  const wb=XLSX.utils.book_new();
+  const laneNames=['Went Well','Improve','Not Sure'];
+
+  // Summary sheet
+  const sumData=[['Room','Date','Cards','Votes','Players']];
+  ADM.sessions.forEach(s=>{
+    sumData.push([s.id,s.date,s.totalCards,s.totalVotes,s.players.length]);
+  });
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(sumData),'Summary');
+
+  // All cards
+  const cardsData=[['Room','Date','Lane','Content','Votes']];
+  ADM.sessions.forEach(s=>{
+    [0,1,2].forEach(ci=>{
+      s.cards.filter(c=>c.col===ci).forEach(c=>{
+        cardsData.push([s.id,s.date,laneNames[ci],c.txt,c.votes]);
+      });
+    });
+  });
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(cardsData),'All Cards');
+
+  XLSX.writeFile(wb,`RetroQuest-All-Sessions-${new Date().toLocaleDateString('th-TH')}.xlsx`);
+  toast(`📊 ${ADM.sessions.length} sessions exported to Excel!`);
 }
 
 // ═══════════════════════════════════════════
