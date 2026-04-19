@@ -203,6 +203,12 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
 .p-tag{font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
   padding:2px 9px;border-radius:100px}
 .tag-host{background:rgba(245,200,66,.12);color:var(--y)}
+.lead-indicator{display:inline-flex;align-items:center;gap:5px;background:rgba(245,200,66,.1);border:1px solid rgba(245,200,66,.22);border-radius:100px;padding:3px 10px;font-size:11px;font-weight:700;color:var(--y);font-family:'Syne',sans-serif}
+.lead-indicator.hidden{display:none}
+.new-lead-banner{position:fixed;top:64px;left:50%;transform:translateX(-50%);background:var(--y);color:#111;font-family:'Syne',sans-serif;font-weight:800;font-size:13px;padding:10px 20px;border-radius:100px;z-index:100;animation:slideDown .4s ease,fadeOut .4s ease 3s forwards;pointer-events:none}
+@keyframes slideDown{from{transform:translateX(-50%) translateY(-20px);opacity:0}to{transform:translateX(-50%) translateY(0);opacity:1}}
+@keyframes fadeOut{to{opacity:0}}
+
 .tag-bot{background:rgba(108,143,255,.12);color:var(--b)}
 .tag-you{background:rgba(47,232,168,.1);color:var(--g)}
 
@@ -944,7 +950,7 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
 
     <div class="muted blink-anim" id="lobby-status">Waiting for players…</div>
     <button class="btn btn-g btn-full" id="start-btn" style="display:none" onclick="startGame()">🚀 Start Game</button>
-    <button class="btn btn-out btn-sm" onclick="show('s-home')">Leave Room</button>
+    <button class="btn btn-out btn-sm" onclick="leaveRoom()">Leave Room</button>
   </div>
 </div>
 
@@ -955,6 +961,7 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
     <!-- Top bar -->
     <div class="top-bar w680">
       <div class="logo-sm">RetroQuest</div>
+      <div id="ice-lead-pill" class="lead-indicator hidden"></div>
       <div style="display:flex;align-items:center;gap:10px">
         <div class="xp-chip">⚡ <span id="ice-xp">0</span> XP</div>
         <div class="timer-wrap">
@@ -1000,6 +1007,7 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
   <div class="w960" style="display:flex;flex-direction:column;align-items:center;gap:12px;padding-top:6px">
     <div class="top-bar w960">
       <div class="logo-sm">RetroQuest</div>
+      <div id="retro-lead-pill" class="lead-indicator hidden"></div>
       <div style="display:flex;align-items:center;gap:9px">
         <div class="xp-chip">⚡ <span id="retro-xp">0</span> XP</div>
         <div class="timer-wrap">
@@ -1036,6 +1044,7 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
 
     <div class="top-bar w680">
       <div class="logo-sm">RetroQuest</div>
+      <div id="rev-lead-pill" class="lead-indicator hidden"></div>
       <div class="xp-chip">⚡ <span id="rev-xp">0</span> XP</div>
     </div>
 
@@ -1283,8 +1292,22 @@ function registerRoomSocketListeners(roomId){
     }
   });
   s.on('player_left', ({player_id})=>{
+    // Check if leaving player was host BEFORE removing from list
+    transferHostIfNeeded(player_id);
     G.players=G.players.filter(p=>p.id!==player_id);
     renderLobby();
+    updateLeadIndicator();
+  });
+  // ✅ Someone else became host (received by all non-new-leads)
+  s.on('host_transferred', ({new_lead_id, new_lead_name, new_lead_avatar})=>{
+    G.players.forEach(p=>{ p.isHost=(p.id===new_lead_id); });
+    if(new_lead_id===G.me.id){
+      // This client is the new host — already handled in transferHostIfNeeded
+    } else {
+      toast(`👑 ${new_lead_avatar} ${new_lead_name} is now Team Lead`);
+    }
+    renderLobby();
+    updateLeadIndicator();
   });
   s.on('game_started', ()=>{
     if(currentScreen==='s-lobby'){show('s-ice');setTimeout(startIce,350);}
@@ -1396,11 +1419,130 @@ function registerRoomSocketListeners(roomId){
 }
 
 // ═══════════════════════════════════════════
+//  URL — pushState sync
+// ═══════════════════════════════════════════
+function syncUrl(path){
+  try{ history.pushState(null,'',path); }catch(e){}
+}
+
+// Handle browser back button
+window.addEventListener('popstate',()=>{
+  // If user presses back while in-game, go home cleanly
+  if(currentScreen!=='s-home'&&currentScreen!=='s-roomsetup'&&currentScreen!=='s-joinsetup'){
+    leaveRoom();
+  }
+});
+
+// ═══════════════════════════════════════════
+//  LEAVE ROOM
+// ═══════════════════════════════════════════
+function leaveRoom(){
+  // Disconnect socket
+  if(G.roomId){
+    try{ getSocket().emit('player_left_voluntary',{ room_id:G.roomId, player_id:G.me.id }); }catch(e){}
+  }
+  // Reset state
+  G.room=''; G.roomId=''; G.isHost=false;
+  G.players=[]; G.chat=[];
+  G.retro={phase:'submit',timer:90,iv:null,cards:[[],[],[]],nextId:0,myVotes:new Set()};
+  G.ice={qIdx:0,timer:10,iv:null,answered:false,myPick:-1,scores:{},
+         answerCounts:[0,0,0,0],answeredCount:0,_resultsShown:false,playerPicks:{}};
+  clearInterval(G.retro.iv); clearInterval(G.ice.iv);
+  // Clear URL
+  syncUrl('/');
+  show('s-home');
+}
+
+// ═══════════════════════════════════════════
+//  TEAM LEAD INDICATOR
+// ═══════════════════════════════════════════
+function updateLeadIndicator(){
+  const lead=G.players.find(p=>p.isHost&&!p.isBot);
+  const name=lead?.name||lead?.anon_handle||'Team Lead';
+  const avatar=lead?.avatar||'👑';
+  const label=G.isHost?'You are Team Lead':'Team Lead: '+avatar+' '+name;
+
+  ['ice-lead-pill','retro-lead-pill','rev-lead-pill'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(!el)return;
+    if(G.isHost){
+      el.classList.add('hidden'); // host เห็น panel อยู่แล้ว
+    }else{
+      el.textContent='👑 '+label;
+      el.classList.remove('hidden');
+    }
+  });
+}
+
+// ═══════════════════════════════════════════
+//  HOST TRANSFER
+// ═══════════════════════════════════════════
+function transferHostIfNeeded(leftPlayerId){
+  const wasHost=G.players.find(p=>p.id===leftPlayerId&&p.isHost);
+  if(!wasHost) return; // ไม่ใช่ host ที่ออก ไม่ต้องทำอะไร
+
+  // หา human player คนแรกที่เหลืออยู่ (ไม่นับ bot)
+  const remaining=G.players.filter(p=>p.id!==leftPlayerId&&!p.isBot);
+  if(!remaining.length) return; // ไม่มีคนเหลือ
+
+  const newLead=remaining[0];
+  // อัปเดต isHost ใน player list
+  G.players.forEach(p=>{ p.isHost=(p.id===newLead.id); });
+
+  // ถ้าเราคือคนที่ได้เป็น host คนใหม่
+  if(newLead.id===G.me.id){
+    G.isHost=true;
+    // แสดง host panel
+    const screens=['s-ice','s-retro','s-review'];
+    if(screens.includes(currentScreen)){
+      document.getElementById('host-panel').classList.remove('hidden');
+    }
+    // แสดง start button ถ้ายังอยู่ใน lobby
+    if(currentScreen==='s-lobby'){
+      document.getElementById('start-btn').style.display='block';
+      document.getElementById('lobby-lock-wrap').style.display='block';
+    }
+    // แจ้ง backend ว่า player นี้เป็น lead ใหม่
+    if(G.roomId){
+      api.post(`/api/rooms/${G.roomId}/start`,{ team_lead_player_id:G.me.id })
+        .catch(e=>console.warn('lead transfer:', e.message));
+    }
+    // แสดง banner แจ้งเตือน
+    showNewLeadBanner();
+  }
+
+  // Broadcast ให้ทุกคนรู้ว่า lead เปลี่ยน
+  if(G.isHost&&G.roomId){
+    getSocket().emit('host_transferred',{
+      room_id:G.roomId,
+      new_lead_id:newLead.id,
+      new_lead_name:newLead.name||newLead.anon_handle,
+      new_lead_avatar:newLead.avatar,
+    });
+  }
+
+  toast(`👑 ${newLead.name||newLead.anon_handle} is now Team Lead`);
+  updateLeadIndicator();
+}
+
+function showNewLeadBanner(){
+  const old=document.querySelector('.new-lead-banner');
+  if(old) old.remove();
+  const b=document.createElement('div');
+  b.className='new-lead-banner';
+  b.textContent='👑 You are now the Team Lead!';
+  document.body.appendChild(b);
+  setTimeout(()=>b.remove(), 3600);
+}
+
+// ═══════════════════════════════════════════
 //  SCREEN
 // ═══════════════════════════════════════════
 function show(id){
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
-  setTimeout(()=>{document.getElementById(id)?.classList.add('active');currentScreen=id},12);
+  setTimeout(()=>{document.getElementById(id)?.classList.add('active');currentScreen=id;
+    updateLeadIndicator();
+  },12);
 
   const hasPanel=G.isHost&&['s-ice','s-retro','s-review'].includes(id);
   document.getElementById('host-panel').classList.toggle('hidden',!hasPanel);
@@ -1480,6 +1622,9 @@ async function createRoom(){
     G.players=[{...G.me,id:player.id,isHost:true,isBot:false}];
     G.ice.scores[G.me.id]=0;
 
+    // ✅ Sync URL so host can share from address bar
+    syncUrl(`/join/${G.room}`);
+
     // Connect socket and join room channel
     const s=getSocket();s.connect();
     s.emit('join_room',{ room_id:room.id, player_id:player.id });
@@ -1531,6 +1676,9 @@ async function joinRoom(){
       isBot:p.is_bot,
     }));
     G.ice.scores[G.me.id]=0;
+
+    // ✅ Sync URL
+    syncUrl(`/join/${G.room}`);
 
     // Connect socket
     const s=getSocket();s.connect();
@@ -2557,6 +2705,9 @@ function doExport(){
 function playAgain(){
   R.totalEarned=0;
   G.chat=[];
+  G.room=''; G.roomId=''; G.isHost=false;
+  G.players=[];
+  syncUrl('/');
   show('s-home');
 }
 
