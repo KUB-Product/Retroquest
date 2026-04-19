@@ -4,7 +4,7 @@
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync } from 'fs';
 import { resolve } from 'path';
 
-const SRC  = resolve('public/index.html');
+const SRC  = resolve('index.html');
 const DIST = resolve('dist/index.html');
 
 // สร้างโฟลเดอร์ dist
