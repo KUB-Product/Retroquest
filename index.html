@@ -209,7 +209,6 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
 @keyframes slideDown{from{transform:translateX(-50%) translateY(-20px);opacity:0}to{transform:translateX(-50%) translateY(0);opacity:1}}
 @keyframes fadeOut{to{opacity:0}}
 
-.tag-bot{background:rgba(108,143,255,.12);color:var(--b)}
 .tag-you{background:rgba(47,232,168,.1);color:var(--g)}
 
 /* cap bar */
@@ -1165,16 +1164,6 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
 // ═══════════════════════════════════════════
 const AVATARS=['🦊','🐻','🐺','🦁','🐯','🦋','🐉','🦄','🐸','🐧','🦅','🦉','🐙','🦑','🌙','⚡','🎯','🔥','💎','🚀','🌈','🍀','🎲','🏔️'];
 const ANON_ADJ=['Ghost','Ninja','Shadow','Phantom','Agent','Ranger','Scout','Comet','Rebel','Player','Viper','Falcon'];
-const BOTS=[{id:'b1',name:'Priya',avatar:'🦊'},{id:'b2',name:'Marco',avatar:'🐻'},{id:'b3',name:'Yuki',avatar:'🐺'},{id:'b4',name:'Dev',avatar:'🦁'}];
-const BOT_CARDS={
-  0:['Great async comms this sprint 👌','Full velocity — every story shipped 🚀','Code reviews were fast and constructive','Pair programming unblocked the auth module'],
-  1:['Sprint planning ran over — need better timeboxing ⏱','Too many context switches mid-sprint','PR descriptions were vague, need a template','Documentation fell behind feature dev'],
-  2:['Massive kudos to Dev for the API work ⚡','Thanks for the late-night deploy support 🙌','The demo-day UI was exceptional 🔥','Unblocking auth in record time 💪'],
-  3:['Set up automated deployment pipeline','Create a PR description template','Schedule weekly tech debt sessions','Implement WIP limits on our board'],
-};
-const BOT_CHAT=[
-  'Hey everyone! Ready for retro? 👋','Who else thought this sprint flew by?','That demo went really well 🎉','Can\'t believe we shipped everything 🚀','Let\'s focus on the deployment stuff today','Happy to be here — let\'s make this one count','Quick question — are bots counted in the 20-player cap? 😂','Looking forward to the action auction','Good session everyone!','Anyone else using the 50/50 lifeline later? 🎯'
-];
 const QUESTIONS=[
   {q:"When someone says 'this will only take 5 minutes'…",opts:['Trust them completely 🙏','Add 2 hours to the estimate ⏱','Ask them to elaborate 🤔','Cancel the sprint 🚨'],correct:1},
   {q:"The #1 sign of a GREAT retrospective is…",opts:['Everyone agrees on everything','Clear action items with real owners ✅','It finishes early 🏃','Unlimited snacks 🍕'],correct:1},
@@ -1188,7 +1177,6 @@ const COLS=[{label:'Went Well',icon:'🚀',color:'var(--g)'},{label:'Improve',ic
 //  GAME STATE
 // ═══════════════════════════════════════════
 const CFG={
-  botsEnabled:true,
   roomOpen:true,
   iceTimerSecs:10,
   retroSubmitSecs:90,
@@ -1295,7 +1283,6 @@ function registerRoomSocketListeners(roomId){
       ...p,
       name: p.anon_handle||'Player',
       isHost: p.is_team_lead||false,
-      isBot: p.is_bot||false,
     });
     renderLobby();
     updateLeadIndicator();
@@ -1362,7 +1349,7 @@ function registerRoomSocketListeners(roomId){
     G.ice.answeredCount++;
     G.ice.playerPicks[player_id]=chosen_idx;
     if(xp_earned>0) G.ice.scores[player_id]=(G.ice.scores[player_id]||0)+xp_earned;
-    const humanTotal=G.players.filter(p=>!p.isBot).length;
+    const humanTotal=G.players.length;
     document.getElementById('ice-answered-lbl').textContent=
       `${G.ice.answeredCount} / ${humanTotal} answered`;
     // If all human players answered, reveal results early
@@ -1461,14 +1448,73 @@ function registerRoomSocketListeners(roomId){
 //  SESSION TOKEN (refresh dedup)
 // ═══════════════════════════════════════════
 // One token per room per browser — survives refresh, cleared on Leave/Play Again
+// ═══════════════════════════════════════════
+//  SESSION — 4 hour localStorage persistence
+// ═══════════════════════════════════════════
+const SESSION_TTL = 4 * 60 * 60 * 1000; // 4 hours in ms
+const SESSION_KEY = 'rq_session';
+
+function saveSession(roomCode, data){
+  try{
+    const sessions = getAllSessions();
+    sessions[roomCode] = { ...data, savedAt: Date.now() };
+    localStorage.setItem(SESSION_KEY, JSON.stringify(sessions));
+  }catch(e){}
+}
+
+function getSession(roomCode){
+  try{
+    const sessions = getAllSessions();
+    const s = sessions[roomCode];
+    if(!s) return null;
+    // Check TTL
+    if(Date.now() - s.savedAt > SESSION_TTL){
+      deleteSession(roomCode);
+      return null;
+    }
+    return s;
+  }catch(e){ return null; }
+}
+
+function deleteSession(roomCode){
+  try{
+    const sessions = getAllSessions();
+    delete sessions[roomCode];
+    localStorage.setItem(SESSION_KEY, JSON.stringify(sessions));
+  }catch(e){}
+}
+
+function getAllSessions(){
+  try{
+    return JSON.parse(localStorage.getItem(SESSION_KEY)||'{}');
+  }catch(e){ return {}; }
+}
+
+function cleanExpiredSessions(){
+  try{
+    const sessions = getAllSessions();
+    const now = Date.now();
+    Object.keys(sessions).forEach(code=>{
+      if(now - sessions[code].savedAt > SESSION_TTL) delete sessions[code];
+    });
+    localStorage.setItem(SESSION_KEY, JSON.stringify(sessions));
+  }catch(e){}
+}
+
+// Backward compat aliases (used in join/create flow)
 function getRoomSessionToken(roomCode){
-  const key='rq_st_'+roomCode;
-  let token=sessionStorage.getItem(key);
-  if(!token){ token=Math.random().toString(36).slice(2)+Date.now().toString(36); sessionStorage.setItem(key,token); }
+  const s = getSession(roomCode);
+  if(s) return s.token;
+  const token = Math.random().toString(36).slice(2)+Date.now().toString(36);
+  saveSession(roomCode, { token });
   return token;
 }
+function saveRoomSession(roomCode, avatar, extra={}){
+  const s = getSession(roomCode) || {};
+  saveSession(roomCode, { ...s, avatar, ...extra });
+}
 function clearRoomSessionToken(roomCode){
-  if(roomCode) sessionStorage.removeItem('rq_st_'+roomCode);
+  if(roomCode) deleteSession(roomCode);
 }
 
 // ═══════════════════════════════════════════
@@ -1510,7 +1556,7 @@ function leaveRoom(){
 //  TEAM LEAD INDICATOR
 // ═══════════════════════════════════════════
 function updateLeadIndicator(){
-  const lead=G.players.find(p=>p.isHost&&!p.isBot);
+  const lead=G.players.find(p=>p.isHost);
   const name=lead?.name||lead?.anon_handle||'Team Lead';
   const avatar=lead?.avatar||'👑';
   const label=G.isHost?'You are Team Lead':'Team Lead: '+avatar+' '+name;
@@ -1535,7 +1581,7 @@ function transferHostIfNeeded(leftPlayerId){
   if(!wasHost) return; // ไม่ใช่ host ที่ออก ไม่ต้องทำอะไร
 
   // หา human player คนแรกที่เหลืออยู่ (ไม่นับ bot)
-  const remaining=G.players.filter(p=>p.id!==leftPlayerId&&!p.isBot);
+  const remaining=G.players.filter(p=>p.id!==leftPlayerId);
   if(!remaining.length) return; // ไม่มีคนเหลือ
 
   const newLead=remaining[0];
@@ -1649,7 +1695,6 @@ async function createRoom(){
   try {
     // Create room in Supabase via API
     const { room } = await api.post('/api/rooms',{
-      cfg_bots_enabled:      CFG.botsEnabled,
       cfg_room_open:         CFG.roomOpen,
       cfg_ice_timer_secs:    CFG.iceTimerSecs,
       cfg_retro_submit_secs: CFG.retroSubmitSecs,
@@ -1660,20 +1705,21 @@ async function createRoom(){
     // Join as Team Lead
     const sessionToken=getRoomSessionToken(room.code);
     const { player } = await api.post(`/api/rooms/${room.id}/join`,{
-      avatar: G.me.avatar, is_bot: false, session_token: sessionToken,
+      avatar: G.me.avatar, session_token: sessionToken,
     });
     // Promote to team lead
     await supabaseUpdateLead(room.id, player.id);
     G.me.id=player.id;
     // ✅ Sync local name with DB handle
     G.me.name=player.anon_handle||G.me.name;
+    saveRoomSession(room.code, G.me.avatar, { name: G.me.name, playerId: player.id });
 
     // Save custom questions if any
     if(CFG.customQuestions.length>0){
       await api.post('/api/ice/questions',{ room_id: room.id, questions: CFG.customQuestions });
     }
 
-    G.players=[{...G.me,id:player.id,isHost:true,isBot:false}];
+    G.players=[{...G.me,id:player.id,isHost:true}];
     G.ice.scores[G.me.id]=0;
 
     // ✅ Sync URL so host can share from address bar
@@ -1696,7 +1742,6 @@ async function createRoom(){
             G.players.push({...fp,
               name:fp.anon_handle||'Player',
               isHost:fp.is_team_lead===true,
-              isBot:fp.is_bot===true,
             });
           }
         });
@@ -1727,7 +1772,7 @@ async function joinRoom(){
     const { room } = await api.get(`/api/rooms/${code}`);
     G.room=room.code; G.roomId=room.id;
 
-    // ✅ Use server room config (not local CFG defaults)
+    // ✅ Use server room config
     CFG.botsEnabled    = room.cfg_bots_enabled ?? false;
     CFG.roomOpen       = room.cfg_room_open    ?? true;
     CFG.iceTimerSecs   = room.cfg_ice_timer_secs   ?? 10;
@@ -1735,10 +1780,10 @@ async function joinRoom(){
     CFG.retroVoteSecs  = room.cfg_retro_vote_secs  ?? 60;
 
     const sessionToken=getRoomSessionToken(room.code);
-    const { player } = await api.post(`/api/rooms/${room.id}/join`,{ avatar: G.me.avatar, is_bot: false, session_token: sessionToken });
+    const { player } = await api.post(`/api/rooms/${room.id}/join`,{ avatar: G.me.avatar, session_token: sessionToken });
     G.me.id=player.id;
-    // ✅ Sync local name with DB handle
     G.me.name=player.anon_handle||G.me.name;
+    saveRoomSession(room.code, G.me.avatar, { name: G.me.name, playerId: player.id });
 
     // Fetch existing players
     const { players } = await api.get(`/api/rooms/${room.id}/players`);
@@ -1746,25 +1791,20 @@ async function joinRoom(){
       ...p,
       name: p.anon_handle||p.name||'Player',
       isHost: p.is_team_lead===true,
-      isBot: p.is_bot===true,
     }));
-    // Detect if we are host (our player record has is_team_lead=true)
+    // ✅ Detect host from DB (reliable, not G.isHost=false assumption)
     const myRecord=G.players.find(p=>p.id===player.id);
     if(myRecord?.isHost) G.isHost=true;
     G.ice.scores[G.me.id]=0;
 
-    // ✅ Sync URL
     syncUrl(`/join/${G.room}`);
 
     // Connect socket
     const s=getSocket();if(!s.connected)s.connect();
     s.emit('join_room',{ room_id:room.id, player_id:player.id });
-
-    // Register socket listeners for this session
     registerRoomSocketListeners(room.id);
 
-    // ✅ Re-sync players AFTER socket connected — catches anyone who joined
-    // during the gap between initial fetch and socket connection
+    // ✅ Re-sync players after socket connected
     setTimeout(async ()=>{
       try{
         const { players: fresh } = await api.get(`/api/rooms/${room.id}/players`);
@@ -1772,34 +1812,94 @@ async function joinRoom(){
           ...p,
           name: p.anon_handle||p.name||'Player',
           isHost: p.is_team_lead===true,
-          isBot: p.is_bot===true,
-        }));
-        // Merge: add any players not already in local list
+            }));
         freshMapped.forEach(fp=>{
           if(!G.players.find(lp=>lp.id===fp.id)){
             G.players.push(fp);
           } else {
-            // Update existing (e.g. is_team_lead might have changed)
             const idx=G.players.findIndex(lp=>lp.id===fp.id);
             G.players[idx]={...G.players[idx],...fp};
           }
         });
-        // Remove players who left (in local but not in fresh)
         G.players=G.players.filter(lp=>
-          lp.isBot || freshMapped.find(fp=>fp.id===lp.id)
+          freshMapped.find(fp=>fp.id===lp.id)
         );
         renderLobby();
         updateLeadIndicator();
       }catch(e){}
     }, 800);
 
-    // Load recent chat history (last 20 msgs)
+    // Load recent chat history
     try{
       const { messages } = await api.get(`/api/chat/${room.id}`);
-      messages.forEach(m=>addChatMsg(m.avatar||m.players?.avatar||'🦄', m.handle||m.players?.anon_handle||'Player', m.content, m.is_team_lead||m.players?.is_team_lead||false));
+      messages.forEach(m=>addChatMsg(
+        m.avatar||m.players?.avatar||'🦄',
+        m.handle||m.players?.anon_handle||'Player',
+        m.content,
+        m.is_team_lead||m.players?.is_team_lead||false
+      ));
     }catch(e){}
 
-    initLobby();
+    // ✅ Route to correct screen based on current room phase (handles refresh mid-game)
+    const phase = room.phase || 'lobby';
+    const retroPhase = room.retro_phase || 'submit';
+
+    if(phase==='lobby' || phase==='waiting'){
+      initLobby();
+    } else if(phase==='ice'){
+      // Returning mid Ice Breaker — go to lobby first, start ice
+      initLobby(true); // true = skip bot spawn
+      show('s-ice');
+      setTimeout(()=>startIce().catch(e=>console.warn('startIce:',e)), 350);
+    } else if(phase==='retro'){
+      initLobby(true);
+      // Fetch existing cards from DB for this player
+      try{
+        const { cards } = await api.get(`/api/rooms/${room.id}/cards?phase=${retroPhase}&player_id=${G.me.id}`);
+        if(cards?.length){
+          G.retro.cards=[[],[],[]];
+          cards.forEach(c=>{
+            const ci=['went_well','improve','not_sure'].indexOf(c.col);
+            if(ci>=0) G.retro.cards[ci].push({
+              id:G.retro.nextId++, dbId:c.id,
+              txt:c.content, pid:c.player_id,
+              pname:c.players?.anon_handle||'Unknown',
+              pav:c.players?.avatar||'🦄',
+              votes:c.vote_count||0,
+              isMe:c.player_id===G.me.id,
+              spotlight:false,
+            });
+          });
+        }
+      }catch(e){}
+      startRetro(true); // true = skip reset cards
+    } else if(phase==='review'){
+      initLobby(true);
+      try{
+        const { cards } = await api.get(`/api/rooms/${room.id}/cards?phase=vote&player_id=${G.me.id}`);
+        if(cards?.length){
+          G.retro.cards=[[],[],[]];
+          cards.forEach(c=>{
+            const ci=['went_well','improve','not_sure'].indexOf(c.col);
+            if(ci>=0) G.retro.cards[ci].push({
+              id:G.retro.nextId++, dbId:c.id,
+              txt:c.content, pid:c.player_id,
+              pname:c.players?.anon_handle||'Unknown',
+              pav:c.players?.avatar||'🦄',
+              votes:c.vote_count||0,
+              isMe:c.player_id===G.me.id,
+              spotlight:false,
+            });
+          });
+        }
+      }catch(e){}
+      startReview();
+    } else if(phase==='results'){
+      showResults();
+    } else {
+      initLobby();
+    }
+
   }catch(e){ toast('Could not join: '+e.message); }
 }
 
@@ -1808,7 +1908,7 @@ function randomHandle(){const a=ANON_ADJ[Math.floor(Math.random()*ANON_ADJ.lengt
 // ═══════════════════════════════════════════
 //  LOBBY
 // ═══════════════════════════════════════════
-function initLobby(){
+function initLobby(skipBots=false){
   document.getElementById('lobby-code').textContent=G.room;
   const link=`${window.location.origin}/join/${G.room}`;
   document.getElementById('invite-link-display').textContent=link;
@@ -1817,34 +1917,13 @@ function initLobby(){
   renderLobby();show('s-lobby');
   updateLockUI();
 
+  if(skipBots) return; // ✅ Refresh rejoin — skip bot spawn to avoid duplicates
+
   // Bots join after delays — ONLY for host, only if enabled
-  if(G.isHost && CFG.botsEnabled){
-    BOTS.forEach((bot,i)=>setTimeout(()=>{
-      if(G.players.length>=20)return;
-      G.players.push({...bot,name:randomHandle(),isHost:false,isBot:true,xp:0});
-      G.ice.scores[bot.id]=0;
-      renderLobby();
-      const ct=G.players.length;
-      if(ct>=3&&G.isHost){
-        const s=document.getElementById('lobby-status');
-        s.textContent=`${ct} players ready — host can start!`;s.classList.remove('blink-anim');
-      }
+
     },1200+i*1100));
   }
 
-  // Bot chat messages — only if bots present and host
-  if(G.isHost && CFG.botsEnabled){
-    let chatDelay=3000;
-    BOT_CHAT.slice(0,6).forEach((msg,i)=>{
-      setTimeout(()=>{
-        const bots=G.players.filter(p=>p.isBot);
-        if(!bots.length)return;
-        const bot=bots[Math.floor(Math.random()*bots.length)];
-        addChatMsg(bot.avatar,bot.name,msg,false);
-      },chatDelay);
-      chatDelay+=2500+Math.random()*3000;
-    });
-  }
 }
 
 function renderLobby(){
@@ -1859,10 +1938,9 @@ function renderLobby(){
       <div class="p-av">${p.avatar}</div>
       <div style="flex:1">
         <div class="p-name">${p.name||p.anon_handle||'Player'}${p.id===G.me.id?' <span style="font-size:10px;color:var(--mt)">(you)</span>':''}</div>
-        <div class="muted">${p.isBot?'Bot Player':'Online'}</div>
+        <div class="muted">Online</div>
       </div>
       ${p.isHost?'<span class="p-tag tag-host">LEAD</span>':''}
-      ${p.isBot?'<span class="p-tag tag-bot">BOT</span>':''}
       ${p.id===G.me.id&&!p.isHost?'<span class="p-tag tag-you">YOU</span>':''}
     </div>`).join('');
 }
@@ -2016,30 +2094,6 @@ function loadQ(){
   renderIceSc();
   startIceTimer();
 
-  // Schedule bot answers — only for actual bots, only by host
-  const totalPlayers=G.players.filter(p=>!p.isBot).length;
-  if(G.isHost){
-    G.players.filter(p=>p.isBot).forEach(bot=>{
-    const ok=Math.random()<.65;
-    const botIdx=ok?q.correct:(q.correct+1+Math.floor(Math.random()*3))%q.opts.length;
-    const delay=1500+Math.random()*(CFG.iceTimerSecs*900);
-    setTimeout(()=>{
-      if(currentScreen!=='s-ice')return;
-      G.ice.answerCounts[botIdx]=(G.ice.answerCounts[botIdx]||0)+1;
-      G.ice.answeredCount++;
-      G.ice.playerPicks[bot.id]=botIdx;
-      const xp=ok?((q.xp||100)+Math.floor(Math.random()*50)):0;
-      G.ice.scores[bot.id]=(G.ice.scores[bot.id]||0)+xp;
-      document.getElementById('ice-answered-lbl').textContent=
-        `${G.ice.answeredCount+(G.ice.answered?1:0)} / ${totalPlayers} answered`;
-      // If all bots + player answered early, reveal results
-      if(G.ice.answered && G.ice.answeredCount>=G.players.filter(p=>p.isBot).length){
-        clearInterval(G.ice.iv);
-        revealResults();
-      }
-    },delay);
-  });
-  } // end if(G.isHost)
 }
 
 function startIceTimer(){
@@ -2102,7 +2156,7 @@ function ansQ(idx){
 
   // Check if all non-bot players answered
   const botsAnswered=G.ice.answeredCount-1;
-  if(botsAnswered>=G.players.filter(p=>p.id!==G.me.id&&p.isBot).length){
+  if(false){ // bots removed
     setTimeout(revealResults,600);
   }else{
     const wait=Math.min((CFG.iceTimerSecs)*1000, 3000);
@@ -2241,14 +2295,17 @@ function endIce(){
 // ═══════════════════════════════════════════
 //  RETRO
 // ═══════════════════════════════════════════
-function startRetro(){
-  G.retro.phase='submit';G.retro.cards=[[],[],[]];G.retro.myVotes=new Set();G.retro.nextId=0;
+function startRetro(keepCards=false){
+  if(!keepCards){
+    G.retro.phase='submit';G.retro.cards=[[],[],[]];G.retro.myVotes=new Set();G.retro.nextId=0;
+  } else {
+    G.retro.phase='submit';G.retro.myVotes=new Set();
+  }
   syncXPChips();
   document.getElementById('retro-phase-lbl').textContent=`Submit your cards (${CFG.retroSubmitSecs}s)`;
   document.getElementById('submit-area').style.display='block';
   buildRetroGrid();show('s-retro');
   startRetroTimer(CFG.retroSubmitSecs,toVote);
-  scheduleBotCards();
 }
 function buildRetroGrid(){
   document.getElementById('retro-grid').innerHTML=COLS.map((c,ci)=>`
@@ -2271,20 +2328,7 @@ function updRetroTmr(t,max){
   document.getElementById('retro-ring').style.strokeDashoffset=off;
   document.getElementById('retro-ring').style.stroke=G.retro.phase==='submit'?'var(--g)':'var(--b)';
 }
-function scheduleBotCards(){
-  if(!G.isHost)return; // only host schedules bot cards
-  let d=3500;
-  G.players.filter(p=>p.isBot).forEach(bot=>{ // only real bots
-    const n=1+Math.floor(Math.random()*2);
-    for(let c=0;c<n;c++){
-      const col=Math.floor(Math.random()*3);
-      const pool=BOT_CARDS[col];
-      const txt=pool[Math.floor(Math.random()*pool.length)];
-      setTimeout(()=>{if(G.retro.phase==='submit')addCard(col,txt,bot,false,false,false)},d);
-      d+=2800+Math.random()*4000;
-    }
-  });
-}
+
 function selCol(i){G.selCol=i;document.querySelectorAll('.c-tab').forEach((t,j)=>t.classList.toggle('active',i===j))}
 function updateCC(){document.getElementById('cc').textContent=`${document.getElementById('card-inp').value.length}/140`}
 function submitCard(){
@@ -2415,12 +2459,7 @@ function toVote(){
     s.emit('retro_phase_change',{ room_id:G.roomId, retro_phase:'vote' });
   }
   startRetroTimer(CFG.retroVoteSecs,endRetro);
-  setTimeout(()=>{
-    const all=G.retro.cards.flat();
-    G.players.filter(p=>p.id!==G.me.id&&p.isBot).forEach(bot=>{
-      [...all].sort(()=>Math.random()-.5).slice(0,3).forEach(card=>setTimeout(()=>{card.votes++;for(let i=0;i<3;i++)renderCol(i)},Math.random()*9000));
-    });
-  },2500);
+
 }
 function endRetro(){
   toast('Voting done! Starting Card Review…');
@@ -2900,7 +2939,7 @@ async function saveAdminSession(){
     timestamp:Date.now(),
     phase:'completed',
     players:[...G.players].sort((a,b)=>b.xp-a.xp).map(p=>({
-      name:p.name,avatar:p.avatar,xp:p.xp,isBot:p.isBot,isHost:p.isHost
+      name:p.name,avatar:p.avatar,xp:p.xp,isHost:p.isHost
     })),
     cards:allCards,
     commits,
@@ -3064,7 +3103,6 @@ function admRender(){
         <div style="font-size:18px">${p.avatar}</div>
         <div style="flex:1;font-size:12px;font-family:'Syne',sans-serif;font-weight:700">${esc(p.name)}</div>
         ${p.isHost?'<span style="font-size:9px;font-weight:700;color:var(--y);background:rgba(245,200,66,.1);padding:2px 7px;border-radius:100px">LEAD</span>':''}
-        ${p.isBot?'<span style="font-size:9px;color:var(--mt)">bot</span>':''}
         <div style="font-family:\'Syne\',sans-serif;font-weight:700;font-size:12px;color:var(--y)">${p.xp} XP</div>
       </div>`).join('');
 
@@ -3090,7 +3128,7 @@ function admRender(){
           <div class="adm-stat"><div class="adm-stat-n" style="color:var(--g)">${s.totalCards}</div><div class="adm-stat-l">Cards</div></div>
           <div class="adm-stat"><div class="adm-stat-n" style="color:var(--y)">${s.totalVotes}</div><div class="adm-stat-l">Votes</div></div>
           <div class="adm-stat"><div class="adm-stat-n" style="color:var(--pk)">${s.duplicates}</div><div class="adm-stat-l">Duplicates</div></div>
-          <div class="adm-stat"><div class="adm-stat-n" style="color:var(--b)">${s.players.filter(p=>!p.isBot).length}</div><div class="adm-stat-l">Humans</div></div>
+
         </div>
 
         <!-- Expandable sections -->
@@ -3160,25 +3198,49 @@ renderAvGrid('host-av-grid');
 loadAdminSessions().catch(()=>{});
 
 // ── Auto-join from invite link /join/ROOMCODE ─────────────
+
+// ── Auto-rejoin on refresh ────────────────────────────────────
+async function autoRejoin(code){
+  toast('🔄 Reconnecting to room '+code+'…');
+  // ✅ Restore avatar from localStorage session
+  const session=getSession(code);
+  const savedAvatar=session?.avatar||'🦄';
+  G.selAv=savedAvatar;
+  G.me.avatar=savedAvatar;
+  const inp=document.getElementById('join-code');
+  if(inp) inp.value=code;
+  try{
+    await joinRoom();
+  }catch(e){
+    toast('Could not reconnect — please join manually');
+    G._autoJoinCode=code;
+    goJoin();
+  }
+}
+
 (function checkInviteUrl(){
   if(G.room) return; // already in a room, don't interrupt
-  const path = window.location.pathname; // e.g. /join/67LXHZ
+  const path = window.location.pathname;
   const m = path.match(/\/join\/([A-Z0-9]{4,8})/i);
   if(!m) return;
   const code = m[1].toUpperCase();
-  // Pre-fill the join code and open the player setup screen
-  // Wait for DOM to be ready
+
   setTimeout(()=>{
-    // Store code so goJoin can use it
-    G._autoJoinCode = code;
-    // Show player setup directly (skip home screen enter animation)
-    goJoin();
-    // Pre-fill the room code input
-    const inp = document.getElementById('join-code');
-    if(inp) inp.value = code;
-    // Clear the URL so refreshing doesn't re-trigger
-    history.replaceState(null,'', '/');
-  }, 100);
+    cleanExpiredSessions(); // clean stale sessions on load
+    const existingSession = getSession(code);
+    if(existingSession?.token){
+      // ✅ Valid session found — auto-rejoin with same identity
+      history.replaceState(null,'','/');
+      autoRejoin(code);
+    } else {
+      // New user — show join screen
+      G._autoJoinCode = code;
+      goJoin();
+      const inp = document.getElementById('join-code');
+      if(inp) inp.value = code;
+      history.replaceState(null,'','/');
+    }
+  }, 150);
 })();
 </script>
 </body>
