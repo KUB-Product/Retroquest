@@ -1454,6 +1454,8 @@ async function createRoom(){
     // Promote to team lead
     await supabaseUpdateLead(room.id, player.id);
     G.me.id=player.id;
+    // ✅ Sync local name with DB handle
+    G.me.name=player.anon_handle||G.me.name;
 
     // Save custom questions if any
     if(CFG.customQuestions.length>0){
@@ -1466,6 +1468,9 @@ async function createRoom(){
     // Connect socket and join room channel
     const s=getSocket();s.connect();
     s.emit('join_room',{ room_id:room.id, player_id:player.id });
+
+    // ✅ Host must also register socket listeners
+    registerRoomSocketListeners(room.id);
 
     initLobby();
   } catch(e) {
@@ -1490,12 +1495,26 @@ async function joinRoom(){
     const { room } = await api.get(`/api/rooms/${code}`);
     G.room=room.code; G.roomId=room.id;
 
+    // ✅ Use server room config (not local CFG defaults)
+    CFG.botsEnabled    = room.cfg_bots_enabled ?? false;
+    CFG.roomOpen       = room.cfg_room_open    ?? true;
+    CFG.iceTimerSecs   = room.cfg_ice_timer_secs   ?? 10;
+    CFG.retroSubmitSecs= room.cfg_retro_submit_secs?? 90;
+    CFG.retroVoteSecs  = room.cfg_retro_vote_secs  ?? 60;
+
     const { player } = await api.post(`/api/rooms/${room.id}/join`,{ avatar: G.me.avatar, is_bot: false });
     G.me.id=player.id;
+    // ✅ Sync local name with DB handle
+    G.me.name=player.anon_handle||G.me.name;
 
     // Fetch existing players
     const { players } = await api.get(`/api/rooms/${room.id}/players`);
-    G.players=players.map(p=>({...p, isHost:p.is_team_lead, isBot:p.is_bot}));
+    G.players=players.map(p=>({
+      ...p,
+      name: p.anon_handle||p.name||'Player',
+      isHost:p.is_team_lead,
+      isBot:p.is_bot,
+    }));
     G.ice.scores[G.me.id]=0;
 
     // Connect socket
@@ -1504,6 +1523,13 @@ async function joinRoom(){
 
     // Register socket listeners for this session
     registerRoomSocketListeners(room.id);
+
+    // Load recent chat history (last 20 msgs)
+    try{
+      const { messages } = await api.get(`/api/chat/${room.id}`);
+      messages.forEach(m=>addChatMsg(m.avatar||m.players?.avatar||'🦄', m.handle||m.players?.anon_handle||'Player', m.content, m.is_team_lead||m.players?.is_team_lead||false));
+    }catch(e){}
+
     initLobby();
   }catch(e){ toast('Could not join: '+e.message); }
 }
@@ -1522,10 +1548,10 @@ function initLobby(){
   renderLobby();show('s-lobby');
   updateLockUI();
 
-  // Bots join after delays
-  if(CFG.botsEnabled){
+  // Bots join after delays — ONLY for host, only if enabled
+  if(G.isHost && CFG.botsEnabled){
     BOTS.forEach((bot,i)=>setTimeout(()=>{
-      if(G.players.length>=20)return; // enforce cap
+      if(G.players.length>=20)return;
       G.players.push({...bot,name:randomHandle(),isHost:false,isBot:true,xp:0});
       G.ice.scores[bot.id]=0;
       renderLobby();
@@ -1537,17 +1563,19 @@ function initLobby(){
     },1200+i*1100));
   }
 
-  // Bot chat messages
-  let chatDelay=3000;
-  BOT_CHAT.slice(0,6).forEach((msg,i)=>{
-    setTimeout(()=>{
-      const bots=G.players.filter(p=>p.isBot);
-      if(!bots.length)return;
-      const bot=bots[Math.floor(Math.random()*bots.length)];
-      addChatMsg(bot.avatar,bot.name,msg,false);
-    },chatDelay);
-    chatDelay+=2500+Math.random()*3000;
-  });
+  // Bot chat messages — only if bots present and host
+  if(G.isHost && CFG.botsEnabled){
+    let chatDelay=3000;
+    BOT_CHAT.slice(0,6).forEach((msg,i)=>{
+      setTimeout(()=>{
+        const bots=G.players.filter(p=>p.isBot);
+        if(!bots.length)return;
+        const bot=bots[Math.floor(Math.random()*bots.length)];
+        addChatMsg(bot.avatar,bot.name,msg,false);
+      },chatDelay);
+      chatDelay+=2500+Math.random()*3000;
+    });
+  }
 }
 
 function renderLobby(){
@@ -1600,11 +1628,14 @@ function sendChat(){
   const inp=document.getElementById('chat-inp');
   const txt=inp.value.trim();
   if(!txt)return;
-  addChatMsg(G.me.avatar,G.me.name,txt,G.isHost);
   inp.value='';
   if(G.roomId){
+    // ✅ Don't add locally — wait for socket echo (single source of truth)
     api.post('/api/chat',{ room_id:G.roomId, player_id:G.me.id, content:txt })
-      .catch(e=>console.warn('Chat sync:', e.message));
+      .catch(e=>{ toast('Chat error'); console.warn('Chat:', e.message); });
+  } else {
+    // Fallback: offline/prototype mode
+    addChatMsg(G.me.avatar,G.me.name,txt,G.isHost);
   }
 }
 
