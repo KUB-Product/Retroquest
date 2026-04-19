@@ -1,0 +1,18 @@
+{
+  "name": "retroquest",
+  "version": "1.1.0",
+  "description": "RetroQuest v1.1 — Vercel + Supabase production build",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.js",
+    "dev":   "npx serve public -p 3000",
+    "start": "npx serve dist -p 3000"
+  },
+  "devDependencies": {
+    "serve": "^14.2.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
