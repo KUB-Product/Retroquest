@@ -1334,18 +1334,24 @@ function registerRoomSocketListeners(roomId){
     updateLeadIndicator();
   });
   s.on('game_started', ()=>{
-    if(currentScreen==='s-lobby'){show('s-ice');setTimeout(startIce,350);}
+    if(currentScreen==='s-lobby'){show('s-ice');setTimeout(()=>startIce().catch(e=>console.warn('startIce:',e)),350);}
   });
   s.on('phase_changed', ({phase})=>{
-    if(phase==='ice'&&currentScreen==='s-lobby'&&!G.isHost){show('s-ice');setTimeout(startIce,350);}
+    if(phase==='ice'&&currentScreen==='s-lobby'&&!G.isHost){show('s-ice');setTimeout(()=>startIce().catch(e=>console.warn('startIce:',e)),350);}
     else if(phase==='retro'&&currentScreen!=='s-retro'&&!G.isHost)startRetro();
     else if(phase==='review'&&currentScreen!=='s-review'&&!G.isHost)startReview();
     else if(phase==='results'&&currentScreen!=='s-results')showResults();
   });
   s.on('retro_phase_changed', ({retro_phase})=>{
     if(retro_phase==='vote'&&G.retro.phase==='submit'&&!G.isHost){
-      // ✅ Guard: only non-host responds — host already transitioned
-      clearInterval(G.retro.iv);toVote();
+      clearInterval(G.retro.iv);
+      // Participant: switch UI to vote phase but do NOT start timer
+      // Host timer drives endRetro for everyone
+      G.retro.phase='vote';
+      document.getElementById('retro-phase-lbl').textContent=`Vote on cards`;
+      document.getElementById('submit-area').style.display='none';
+      for(let i=0;i<3;i++)renderCol(i);
+      toast('🗳️ Voting phase! Click 👍 to upvote cards');
     }
   });
   // ✅ Ice breaker: update answer counts from real players via socket
@@ -1494,7 +1500,7 @@ function leaveRoom(){
   G.players=[]; G.chat=[];
   G.retro={phase:'submit',timer:90,iv:null,cards:[[],[],[]],nextId:0,myVotes:new Set()};
   G.ice={qIdx:0,timer:10,iv:null,answered:false,myPick:-1,scores:{},
-         answerCounts:[0,0,0,0],answeredCount:0,_resultsShown:false,playerPicks:{}};
+         answerCounts:[0,0,0,0],answeredCount:0,_resultsShown:false,_nextQScheduled:false,playerPicks:{}};
   clearInterval(G.retro.iv); clearInterval(G.ice.iv);
   syncUrl('/');
   show('s-home');
@@ -1674,11 +1680,29 @@ async function createRoom(){
     syncUrl(`/join/${G.room}`);
 
     // Connect socket and join room channel
-    const s=getSocket();s.connect();
+    const s=getSocket();if(!s.connected)s.connect();
     s.emit('join_room',{ room_id:room.id, player_id:player.id });
 
     // ✅ Host must also register socket listeners
     registerRoomSocketListeners(room.id);
+
+    // ✅ Re-sync after socket connected to catch any early joiners
+    setTimeout(async ()=>{
+      try{
+        const { players: fresh } = await api.get(`/api/rooms/${room.id}/players`);
+        fresh.forEach(fp=>{
+          if(fp.id===player.id) return; // skip self
+          if(!G.players.find(lp=>lp.id===fp.id)){
+            G.players.push({...fp,
+              name:fp.anon_handle||'Player',
+              isHost:fp.is_team_lead===true,
+              isBot:fp.is_bot===true,
+            });
+          }
+        });
+        renderLobby();
+      }catch(e){}
+    }, 800);
 
     initLobby();
   } catch(e) {
@@ -1733,11 +1757,41 @@ async function joinRoom(){
     syncUrl(`/join/${G.room}`);
 
     // Connect socket
-    const s=getSocket();s.connect();
+    const s=getSocket();if(!s.connected)s.connect();
     s.emit('join_room',{ room_id:room.id, player_id:player.id });
 
     // Register socket listeners for this session
     registerRoomSocketListeners(room.id);
+
+    // ✅ Re-sync players AFTER socket connected — catches anyone who joined
+    // during the gap between initial fetch and socket connection
+    setTimeout(async ()=>{
+      try{
+        const { players: fresh } = await api.get(`/api/rooms/${room.id}/players`);
+        const freshMapped = fresh.map(p=>({
+          ...p,
+          name: p.anon_handle||p.name||'Player',
+          isHost: p.is_team_lead===true,
+          isBot: p.is_bot===true,
+        }));
+        // Merge: add any players not already in local list
+        freshMapped.forEach(fp=>{
+          if(!G.players.find(lp=>lp.id===fp.id)){
+            G.players.push(fp);
+          } else {
+            // Update existing (e.g. is_team_lead might have changed)
+            const idx=G.players.findIndex(lp=>lp.id===fp.id);
+            G.players[idx]={...G.players[idx],...fp};
+          }
+        });
+        // Remove players who left (in local but not in fresh)
+        G.players=G.players.filter(lp=>
+          lp.isBot || freshMapped.find(fp=>fp.id===lp.id)
+        );
+        renderLobby();
+        updateLeadIndicator();
+      }catch(e){}
+    }, 800);
 
     // Load recent chat history (last 20 msgs)
     try{
@@ -1860,8 +1914,8 @@ function addChatMsg(avatar,handle,text,isHost){
   const msg={avatar,handle,text,isHost,time};
   G.chat.push(msg);
   const el=document.getElementById('chat-msgs');
-  el.innerHTML+=`<div class="chat-msg">
-    <div class="chat-av">${avatar}</div>
+  const div=document.createElement('div');div.className='chat-msg';
+  div.innerHTML=`<div class="chat-av">${avatar}</div>
     <div class="chat-body">
       <div class="chat-meta">
         <span class="chat-handle">${esc(handle)}</span>
@@ -1869,8 +1923,10 @@ function addChatMsg(avatar,handle,text,isHost){
         <span class="chat-time">${time}</span>
       </div>
       <div class="chat-text">${esc(text)}</div>
-    </div>
-  </div>`;
+    </div>`;
+  el.appendChild(div);
+  // Limit chat history to 200 messages to prevent memory leak
+  while(el.children.length>200) el.removeChild(el.firstChild);
   el.scrollTop=el.scrollHeight;
 }
 
@@ -1880,7 +1936,7 @@ function startGame(){
     const s=getSocket();
     s.emit('phase_change',{ room_id:G.roomId, phase:'ice' });
   }
-  show('s-ice');setTimeout(startIce,350);
+  show('s-ice');setTimeout(()=>startIce().catch(e=>console.warn('startIce:',e)),350);
 }
 
 // ═══════════════════════════════════════════
@@ -2144,12 +2200,16 @@ function revealResults(){
     </div>`;
 
   renderIceSc();
-  // Auto-advance after showing results
-  setTimeout(nextQ, 4200);
+  // Auto-advance after showing results — use _nextQScheduled flag to prevent double-fire
+  if(!G.ice._nextQScheduled){
+    G.ice._nextQScheduled=true;
+    setTimeout(()=>{G.ice._nextQScheduled=false;nextQ();}, 4200);
+  }
 }
 
 function nextQ(){
   G.ice._resultsShown=false;
+  G.ice._nextQScheduled=false;
   G.ice.qIdx++;
   loadQ();
 }
@@ -3101,6 +3161,7 @@ loadAdminSessions().catch(()=>{});
 
 // ── Auto-join from invite link /join/ROOMCODE ─────────────
 (function checkInviteUrl(){
+  if(G.room) return; // already in a room, don't interrupt
   const path = window.location.pathname; // e.g. /join/67LXHZ
   const m = path.match(/\/join\/([A-Z0-9]{4,8})/i);
   if(!m) return;
