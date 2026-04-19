@@ -1249,9 +1249,9 @@ function registerRoomSocketListeners(roomId){
   ['player_joined','lead_set','player_left','host_transferred','game_started',
    'phase_changed','retro_phase_changed','ice_answered','cards_revealed',
    'card_voted','card_discussed','card_duplicate','card_commented','card_moved',
-   'chat_message','review_navigate','timer_updated','timer_sync',
-   'ice_reveal','ice_next_q','card_added','room_locked','room_unlocked',
-   'game_ended'].forEach(e=>s.off(e));
+   'card_added','chat_message','review_navigate',
+   'timer_tick','timer_end','timer_updated','ice_reveal','ice_next_q',
+   'room_locked','room_unlocked','game_ended'].forEach(e=>s.off(e));
 
   s.on('player_joined', p=>{
     // Skip if it's ourselves
@@ -1315,11 +1315,9 @@ function registerRoomSocketListeners(roomId){
   });
   s.on('retro_phase_changed', ({retro_phase})=>{
     if(retro_phase==='vote'&&G.retro.phase==='submit'&&!G.isHost){
-      clearInterval(G.retro.iv);
-      // Participant: switch UI to vote phase but do NOT start timer
-      // Host timer drives endRetro for everyone
+      // Participant: update UI only — backend timer_end drives endRetro
       G.retro.phase='vote';
-      document.getElementById('retro-phase-lbl').textContent=`Vote on cards`;
+      document.getElementById('retro-phase-lbl').textContent='Vote on cards';
       document.getElementById('submit-area').style.display='none';
       for(let i=0;i<3;i++)renderCol(i);
       toast('🗳️ Voting phase! Click 👍 to upvote cards');
@@ -1408,20 +1406,22 @@ function registerRoomSocketListeners(roomId){
       }
     });
   });
-  // ✅ Other player submitted a card during submit phase
+  // ✅ Other player submitted a card — show full content immediately
   s.on('card_added', (card)=>{
     if(currentScreen!=='s-retro') return;
-    if(card._player_id===G.me.id) return; // skip own card (already added locally)
+    if(card._player_id===G.me.id) return; // skip own (already added locally)
     if(G.retro.cards.flat().find(c=>c.dbId===card.id)) return; // dedup
     const ci=['went_well','improve','not_sure'].indexOf(card.col);
     if(ci<0) return;
-    // During submit: show card but hide content (revealed at vote phase)
+    // Find player info from players list
+    const author=G.players.find(p=>p.id===(card.player_id||card._player_id));
     G.retro.cards[ci].push({
       id:G.retro.nextId++, dbId:card.id,
-      txt:'',  // hidden during submit
+      txt:card.content||'',
       pid:card.player_id||card._player_id,
-      pname:'Someone', pav:'🕵️',
-      votes:0, isMe:false, spotlight:false, hidden:true,
+      pname:author?.name||author?.anon_handle||'Teammate',
+      pav:author?.avatar||'🦄',
+      votes:0, isMe:false, spotlight:false,
     });
     renderCol(ci);
     document.getElementById(`rcc-${ci}`).textContent=G.retro.cards[ci].length;
@@ -1434,43 +1434,59 @@ function registerRoomSocketListeners(roomId){
       REV.idx=card_index; renderRevCard();
     }
   });
-  s.on('timer_updated', ({delta_seconds})=>{
-    if(!G.isHost){
-      if(delta_seconds<0){ G.ice.timer=0; G.retro.timer=0; }
-      else { G.ice.timer+=delta_seconds; G.retro.timer+=delta_seconds; }
-    }
-  });
-
-  // ✅ Participant syncs timer from host broadcast every second
-  s.on('timer_sync', ({timer, phase})=>{
-    if(G.isHost) return; // host is source of truth
+  // ✅ Backend-driven timer: everyone (including host) receives tick
+  s.on('timer_tick', ({timer, phase, max})=>{
     if(phase==='ice'){
       G.ice.timer = timer;
+      if(max) CFG._iceTimerMax = max;
       updIceTmr();
     } else if(phase==='retro'){
       G.retro.timer = timer;
-      const max = G.retro.phase==='submit' ? CFG.retroSubmitSecs : CFG.retroVoteSecs;
-      updRetroTmr(timer, max);
+      if(max) G.retro._max = max;
+      updRetroTmr(timer, max || G.retro._max || CFG.retroSubmitSecs);
     }
   });
 
-  // ✅ Host triggers reveal — all participants reveal at exact same moment
-  s.on('ice_reveal', ({q_idx, answer_counts, player_picks})=>{
-    if(G.isHost) return;
-    if(Array.isArray(answer_counts)) G.ice.answerCounts = answer_counts;
-    if(player_picks) G.ice.playerPicks = player_picks;
-    G.ice.timer = 0;
-    clearInterval(G.ice.iv);
-    revealResults();
+  // ✅ Backend says timer ended — ALL clients handle phase transition
+  s.on('timer_end', ({phase, reason})=>{
+    if(phase==='ice'){
+      // Trigger reveal for everyone
+      if(!G.ice._resultsShown){
+        getSocket().emit('ice_reveal',{
+          room_id:G.roomId,
+          q_idx:G.ice.qIdx,
+          answer_counts:G.ice.answerCounts,
+          player_picks:G.ice.playerPicks,
+        });
+        revealResults();
+      }
+    } else if(phase==='retro_submit'){
+      if(G.retro.phase==='submit') toVote();
+    } else if(phase==='retro_vote'){
+      if(G.retro.phase==='vote') endRetro();
+    }
   });
 
-  // ✅ Host advances to next question — participants move together
+  // ✅ ice_reveal — sync answer data and reveal
+  s.on('ice_reveal', ({q_idx, answer_counts, player_picks})=>{
+    if(Array.isArray(answer_counts)) G.ice.answerCounts = answer_counts;
+    if(player_picks) G.ice.playerPicks = player_picks;
+    if(!G.ice._resultsShown) revealResults();
+  });
+
+  // ✅ Host advances to next question — everyone moves together
   s.on('ice_next_q', ({q_idx})=>{
-    if(G.isHost) return;
     G.ice._resultsShown = false;
     G.ice._nextQScheduled = false;
     G.ice.qIdx = q_idx;
     loadQ();
+  });
+
+  s.on('timer_updated', ({delta_seconds})=>{
+    // Legacy fallback for +30s/skip via host panel
+    if(G.isHost && G.roomId){
+      getSocket().emit('add_time',{ room_id:G.roomId, delta_seconds });
+    }
   });
 
   s.on('room_locked',   ()=>{CFG.roomOpen=false; updateLockUI()});
@@ -2130,45 +2146,15 @@ function loadQ(){
 }
 
 function startIceTimer(){
-  clearInterval(G.ice.iv);
   G.ice.timer=CFG.iceTimerSecs;
-  G.ice._revealFallback=null; // clear any previous fallback
+  G.ice._revealFallback=null;
   updIceTmr();
-  G.ice.iv=setInterval(()=>{
-    G.ice.timer--;
-    updIceTmr();
-    // Host broadcasts tick every second
-    if(G.isHost && G.roomId){
-      getSocket().emit('timer_tick',{
-        room_id:G.roomId,
-        timer:G.ice.timer,
-        phase:'ice',
-      });
-    }
-    if(G.ice.timer<=0){
-      clearInterval(G.ice.iv);
-      if(G.isHost){
-        // ✅ Mark unanswered players (no pick recorded)
-        // G.ice.myPick stays -1 if host didn't answer = 0 XP, counts as missed
-        if(G.roomId){
-          getSocket().emit('ice_reveal',{
-            room_id:G.roomId,
-            q_idx:G.ice.qIdx,
-            answer_counts:G.ice.answerCounts,
-            player_picks:G.ice.playerPicks,
-          });
-        }
-        revealResults();
-      }
-      // Participants: ice_reveal socket will trigger revealResults()
-      // Fallback: if socket doesn't arrive within 3s, reveal locally
-      if(!G.isHost){
-        G.ice._revealFallback=setTimeout(()=>{
-          if(!G.ice._resultsShown) revealResults();
-        }, 3000);
-      }
-    }
-  },1000);
+  // ✅ Only host starts backend timer — backend broadcasts to everyone
+  if(G.isHost && G.roomId){
+    getSocket().emit('start_timer',{ room_id:G.roomId, phase:'ice' });
+  }
+  // All clients will receive timer_tick from backend
+  // timer_end → revealResults() for everyone
 }
 
 function updIceTmr(){
@@ -2214,7 +2200,17 @@ function ansQ(idx){
       question_id:q.dbId, chosen_idx:idx, time_left_sec:G.ice.timer,
     }).catch(e=>console.warn('ice answer sync:', e.message));
   }
-  // Timer continues — reveal happens when host's timer hits 0
+  // ✅ Check if all players now answered (including host)
+  const humanTotal=G.players.length;
+  const totalAnswered=G.ice.answeredCount; // host's own is already incremented
+  if(G.isHost && G.roomId && totalAnswered>=humanTotal && !G.ice._resultsShown){
+    getSocket().emit('stop_timer_early',{ room_id:G.roomId, phase:'ice', reason:'all_answered' });
+    getSocket().emit('ice_reveal',{
+      room_id:G.roomId, q_idx:G.ice.qIdx,
+      answer_counts:G.ice.answerCounts, player_picks:G.ice.playerPicks,
+    });
+  }
+  // Otherwise timer continues — timer_end will trigger reveal
 }
 
 function revealResults(){
@@ -2371,7 +2367,7 @@ function startRetro(keepCards=false){
   document.getElementById('retro-phase-lbl').textContent=`Submit your cards (${CFG.retroSubmitSecs}s)`;
   document.getElementById('submit-area').style.display='block';
   buildRetroGrid();show('s-retro');
-  startRetroTimer(CFG.retroSubmitSecs,toVote);
+  startRetroTimer(CFG.retroSubmitSecs,'retro_submit',toVote);
 }
 function buildRetroGrid(){
   document.getElementById('retro-grid').innerHTML=COLS.map((c,ci)=>`
@@ -2383,22 +2379,17 @@ function buildRetroGrid(){
       <div class="r-cards" id="rc-${ci}"></div>
     </div>`).join('');
 }
-function startRetroTimer(secs,cb){
-  clearInterval(G.retro.iv);G.retro.timer=secs;const max=secs;
-  updRetroTmr(secs,max);
-  G.retro.iv=setInterval(()=>{
-    G.retro.timer--;
-    updRetroTmr(G.retro.timer,max);
-    // ✅ Host broadcasts retro timer tick every second
-    if(G.isHost && G.roomId){
-      getSocket().emit('timer_tick',{
-        room_id:G.roomId,
-        timer:G.retro.timer,
-        phase:'retro',
-      });
-    }
-    if(G.retro.timer<=0){clearInterval(G.retro.iv);cb()}
-  },1000);
+function startRetroTimer(secs, phase_key, cb){
+  // phase_key: 'retro_submit' or 'retro_vote'
+  G.retro.timer=secs;
+  G.retro._max=secs;
+  updRetroTmr(secs,secs);
+  // ✅ Only host starts the backend timer
+  if(G.isHost && G.roomId){
+    getSocket().emit('start_timer',{ room_id:G.roomId, phase:phase_key });
+  }
+  // Store callback for timer_end handling
+  G.retro._cb=cb;
 }
 function updRetroTmr(t,max){
   const off=145-(t/max)*145;
@@ -2453,15 +2444,7 @@ function isDuplicate(card){
 function renderCol(ci){
   const el=document.getElementById(`rc-${ci}`);if(!el)return;
   el.innerHTML=G.retro.cards[ci].map(card=>{
-    if(G.retro.phase==='submit'&&!card.isMe){
-      // Show masked card (content hidden until vote phase)
-      return`<div class="r-card" style="opacity:.6;background:var(--s2);border:1px dashed var(--br)">
-        <div style="display:flex;align-items:center;gap:6px">
-          <span style="font-size:14px">🕵️</span>
-          <span style="font-size:11px;color:var(--mt);font-style:italic">Someone added a card…</span>
-        </div>
-      </div>`;
-    }
+
     const voted=G.retro.myVotes.has(card.id);
     const dup=G.retro.phase!=='submit'&&isDuplicate(card);
 
@@ -2544,7 +2527,7 @@ function toVote(){
     const s=getSocket();
     s.emit('retro_phase_change',{ room_id:G.roomId, retro_phase:'vote' });
   }
-  startRetroTimer(CFG.retroVoteSecs,endRetro);
+  startRetroTimer(CFG.retroVoteSecs,'retro_vote',endRetro);
 
 }
 function endRetro(){
@@ -2839,17 +2822,15 @@ function endReview(){
 //  HOST PANEL ACTIONS
 // ═══════════════════════════════════════════
 function addTimer(){
-  G.ice.timer=Math.min(G.ice.timer+30,CFG.iceTimerSecs+60);
-  G.retro.timer=G.retro.timer+30;
   toast('⏱️ +30 seconds added');
-  // ✅ Broadcast timer change
-  if(G.roomId) getSocket().emit('timer_override',{ room_id:G.roomId, delta_seconds:30 });
+  if(G.roomId) getSocket().emit('add_time',{ room_id:G.roomId, delta_seconds:30 });
 }
 function skipTimer(){
-  G.ice.timer=0;G.retro.timer=0;
   toast('⏭ Timer skipped');
-  // ✅ Broadcast skip
-  if(G.roomId) getSocket().emit('timer_override',{ room_id:G.roomId, delta_seconds:-999 });
+  // Stop current timer early
+  const phase=currentScreen==='s-ice'?'ice':
+    G.retro.phase==='submit'?'retro_submit':'retro_vote';
+  if(G.roomId) getSocket().emit('stop_timer_early',{ room_id:G.roomId, phase, reason:'skip' });
 }
 function advancePhase(){
   if(currentScreen==='s-ice'){clearInterval(G.ice.iv);endIce()}
