@@ -1,16 +1,25 @@
 {
   "name": "retroquest",
-  "version": "1.1.0",
-  "description": "RetroQuest v1.1 — Vercel + Supabase production build",
+  "version": "2.0.0",
+  "description": "RetroQuest v2 — React + Vite + Socket.IO (served by the existing Retroquest-backend)",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node build.js",
-    "dev":   "npx serve public -p 3000",
-    "start": "npx serve dist -p 3000"
+    "dev": "vite --port 3000 --host",
+    "build": "vite build",
+    "preview": "vite preview --port 3000",
+    "start": "vite preview --port 3000"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "socket.io-client": "^4.7.5",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.2/xlsx-0.20.2.tgz",
+    "zustand": "^4.5.5"
   },
   "devDependencies": {
-    "serve": "^14.2.3"
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.10"
   },
   "engines": {
     "node": ">=18.0.0"
