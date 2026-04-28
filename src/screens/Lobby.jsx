@@ -1,6 +1,6 @@
 // Lobby — shows the room code, invite link, roster, chat, and (for host)
 // lock toggle + start button.
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store.js';
 import { api } from '../api.js';
 import { getSocket } from '../socket.js';
@@ -37,14 +37,14 @@ export default function Lobby() {
 
   // MVP = player with the highest lifetime reaction count. Single winner only
   // when strictly ahead; ties display no crown so nobody "loses" it randomly.
-  const mvpId = (() => {
+  const mvpId = useMemo(() => {
     let best = null, bestN = 0, tie = false;
     for (const [pid, n] of Object.entries(reactionTotals)) {
       if (n > bestN) { best = pid; bestN = n; tie = false; }
       else if (n === bestN && n > 0) { tie = true; }
     }
     return tie || bestN === 0 ? null : best;
-  })();
+  }, [reactionTotals]);
 
   const sendReaction = (to_player_id, emoji) => {
     if (!roomId) return;
@@ -59,9 +59,12 @@ export default function Lobby() {
   // Per-sender chat cooldown. Five seconds between messages is plenty for a
   // 20-person retro and discourages spam/flood without hurting normal flow.
   // We store the unlock deadline (epoch ms) and tick a local clock only while
-  // the cooldown is live so the countdown can update in the UI.
+  // the cooldown is live so the countdown can update in the UI. The ref mirrors
+  // the state so a synchronous double-fire (Enter held down or rapid clicks)
+  // can't slip past the check before React flushes the state update.
   const CHAT_COOLDOWN_MS = 5000;
   const [cooldownUntil, setCooldownUntil] = useState(0);
+  const cooldownUntilRef = useRef(0);
   const [nowTick, setNowTick] = useState(Date.now());
   const cooldownRemaining = Math.max(0, cooldownUntil - nowTick);
   const cooldownSeconds = Math.ceil(cooldownRemaining / 1000);
@@ -107,15 +110,20 @@ export default function Lobby() {
   };
 
   const sendChat = async () => {
-    if (Date.now() < cooldownUntil) {
-      toast(`Please wait ${Math.ceil((cooldownUntil - Date.now()) / 1000)}s`);
+    const now = Date.now();
+    if (now < cooldownUntilRef.current) {
+      toast(`Please wait ${Math.ceil((cooldownUntilRef.current - now) / 1000)}s`);
       return;
     }
     const txt = draft.trim();
     if (!txt) return;
+    // Lock via ref BEFORE any await — state setters don't flush synchronously,
+    // so a second Enter-keydown fired in the same tick would otherwise see
+    // the stale cooldownUntil and slip a duplicate message through.
+    cooldownUntilRef.current = now + CHAT_COOLDOWN_MS;
     setDraft('');
-    setCooldownUntil(Date.now() + CHAT_COOLDOWN_MS);
-    setNowTick(Date.now());
+    setCooldownUntil(now + CHAT_COOLDOWN_MS);
+    setNowTick(now);
     if (roomId) {
       try {
         await api.post('/api/chat', { room_id: roomId, player_id: meId, content: txt });

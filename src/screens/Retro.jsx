@@ -43,14 +43,6 @@ export default function Retro() {
     getSocket().emit('start_timer', { room_id: roomId, phase: phaseKey });
   }, [retro.phase, isHost, roomId, cfg.retroSubmitUnlimited]);
 
-  // Host-driven transitions when timer ends. useRoomSocket sets ice flags; for
-  // retro we need to act on the host side here since the client writes cards.
-  useEffect(() => {
-    if (!isHost) return;
-    // nothing to do — host uses advancePhase / timer_end from socket to call
-    // toVote / endRetro below.
-  }, [isHost]);
-
   // Listen for timer_end for retro phases so the host moves to vote/review.
   useEffect(() => {
     if (!isHost || !roomId) return;

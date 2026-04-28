@@ -128,7 +128,7 @@ export default function JoinSetup() {
             // discussed, duplicates). SR-4 fix parity: without this, a refresher
             // lands in Review with a blank comments panel and un-marked
             // discussed/duplicate flags even though peers already have them.
-            const localByDb = hydrateRetroCards(cards, setRetro, player.id, true);
+            const localByDb = hydrateRetroCards(cards, setRetro, player.id);
             const discussed = new Set();
             const duplicates = new Set();
             for (const c of cards) {

@@ -1,7 +1,6 @@
 // Admin dashboard. Shows all completed sessions with per-session and bulk
 // Excel export. Gatekept by PinOverlay unless an admin token is already cached.
 import { useEffect, useState } from 'react';
-import * as XLSX from 'xlsx';
 import { adminApi, getAdminToken, clearAdminToken, BACKEND_URL } from '../api.js';
 import { useStore } from '../store.js';
 import { toast } from '../toast.js';
@@ -57,7 +56,8 @@ export default function Admin() {
     toast('Signed out of admin');
   };
 
-  const exportOne = (s) => {
+  const exportOne = async (s) => {
+    const XLSX = await import('xlsx');
     const wb = XLSX.utils.book_new();
     const cardsData = [['Lane', 'Content', 'Votes', 'Duplicate']];
     [0, 1, 2].forEach((ci) => {
@@ -79,8 +79,9 @@ export default function Admin() {
     toast('📊 Excel exported!');
   };
 
-  const exportAll = () => {
+  const exportAll = async () => {
     if (!sessions.length) { toast('No sessions to export'); return; }
+    const XLSX = await import('xlsx');
     const wb = XLSX.utils.book_new();
     const sumData = [['Room', 'Date', 'Cards', 'Votes', 'Players']];
     sessions.forEach((s) => sumData.push([s.id, s.date, s.totalCards, s.totalVotes, (s.players || []).length]));
