@@ -110,7 +110,13 @@ export function useRoomSocket() {
     on('card_added', (card) => {
       const st = useStore.getState();
       if (st.screen !== 's-retro') return;
-      if (card._player_id === st.me.id) return; // author already has it locally
+      // Accept either spelling — depending on the broadcast site the backend
+      // sometimes sends `player_id` (canonical) and sometimes `_player_id`
+      // (synthetic for self-events). Either flag means "you wrote it; you
+      // already have an optimistic copy". The dbId check below is the second
+      // defence for the path where neither field is present.
+      const authorId = card._player_id ?? card.player_id;
+      if (authorId === st.me.id) return;
       const lanes = st.retro.cards.map(l => l.slice());
       if (lanes.flat().find(c => c.dbId === card.id)) return; // dedup
       const ci = COL_INDEX[card.col];
@@ -165,12 +171,33 @@ export function useRoomSocket() {
       const st = useStore.getState();
       const local = st.review.queue.find(e => e.card.dbId === card_id);
       if (!local) return;
+      // Server echoes have no player_id, so we can't dedupe by author. Instead
+      // we look for a matching `_pendingSelfComments` entry that the host
+      // submitComment helper just stashed. If we find one, this echo is the
+      // host's own comment — promote the optimistic entry (drop _pendingKey)
+      // instead of appending a duplicate.
+      const pending = st._pendingSelfComments || {};
+      const now = Date.now();
+      let matchedKey = null;
+      for (const [k, v] of Object.entries(pending)) {
+        if (v.expiresAt < now) continue;
+        if (v.dbId === card_id && v.text === comment_text) { matchedKey = k; break; }
+      }
       const t = new Date(created_at || Date.now());
       const time = t.getHours().toString().padStart(2, '0') + ':' + t.getMinutes().toString().padStart(2, '0');
       const next = { ...st.review.comments };
-      const list = next[local.card.id] ? next[local.card.id].slice() : [];
-      list.push({ avatar, handle: author_handle, text: comment_text, isLead: true, time });
-      next[local.card.id] = list;
+      const existing = next[local.card.id] ? next[local.card.id].slice() : [];
+      if (matchedKey) {
+        // Replace the pending optimistic entry with the canonical server copy.
+        const idx = existing.findIndex((c) => c._pendingKey === matchedKey);
+        if (idx >= 0) existing[idx] = { avatar, handle: author_handle, text: comment_text, isLead: true, time };
+        else existing.push({ avatar, handle: author_handle, text: comment_text, isLead: true, time });
+        const { [matchedKey]: _, ...rest } = pending;
+        useStore.setState({ _pendingSelfComments: rest });
+      } else {
+        existing.push({ avatar, handle: author_handle, text: comment_text, isLead: true, time });
+      }
+      next[local.card.id] = existing;
       st.setReview({ comments: next });
     });
 
@@ -204,6 +231,11 @@ export function useRoomSocket() {
     on('ice_answered', ({ player_id, chosen_idx, xp_earned }) => {
       const st = useStore.getState();
       if (player_id === st.me.id || st.screen !== 's-ice') return;
+      // Idempotency guard: backend retries or duplicate broadcasts would
+      // otherwise double-increment answerCounts/answeredCount and skew the
+      // "all answered → reveal" trigger. If we've already recorded this
+      // player's pick for the current question, drop the echo.
+      if (st.ice.playerPicks[player_id] !== undefined) return;
       const counts = st.ice.answerCounts.slice();
       counts[chosen_idx] = (counts[chosen_idx] || 0) + 1;
       const scores = { ...st.ice.scores };

@@ -28,7 +28,6 @@ const initialRetro = () => ({
   cards: [[], [], []],  // indexed by col (0=went_well, 1=improve, 2=not_sure)
   nextId: 0,
   myVotes: new Set(),
-  selCol: 0,
 });
 
 const initialReview = () => ({

@@ -4,10 +4,13 @@
 // has `prefers-reduced-motion`.
 import { useMemo } from 'react';
 
+// Star count tuned down from the original 172. The previous count produced 172
+// individually-animated <span> elements, each with its own opacity keyframe
+// timeline — visible jank on lower-end hardware on the Home screen.
 const STAR_LAYERS = [
-  { count: 120, size: 1, duration: 5.5, opacity: [0.35, 0.85] }, // tiny background
-  { count: 40,  size: 2, duration: 4.0, opacity: [0.55, 1.0] },  // medium twinkle
-  { count: 12,  size: 3, duration: 3.0, opacity: [0.75, 1.0] },  // bright anchors
+  { count: 60, size: 1, duration: 5.5, opacity: [0.35, 0.85] }, // tiny background
+  { count: 20, size: 2, duration: 4.0, opacity: [0.55, 1.0] },  // medium twinkle
+  { count: 8,  size: 3, duration: 3.0, opacity: [0.75, 1.0] },  // bright anchors
 ];
 
 function randomStars(count, size, [minO, maxO]) {

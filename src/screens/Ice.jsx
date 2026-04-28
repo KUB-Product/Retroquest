@@ -242,7 +242,11 @@ export default function Ice() {
   }
 
   const q = ice.questions[ice.qIdx];
-  if (!q) return null;
+  // Guard against malformed questions (custom-question editor or backend bug
+  // could ship a row with fewer than 4 options). Without this, the kah-grid
+  // map below indexes BAR_COLORS[i]/answerCounts[i] out of range and renders
+  // undefined cells.
+  if (!q || !Array.isArray(q.opts) || q.opts.length < 4) return null;
 
   const max = ice.max || cfg.iceTimerSecs || 10;
   // After answers are revealed the question timer is intentionally frozen

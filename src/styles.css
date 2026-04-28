@@ -709,12 +709,14 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
 }
 .galaxy-starlayer{
   position:absolute;inset:0;
-  animation:twinkle 4s ease-in-out infinite alternate;
+  /* Each star has its own star-blink animation. The wrapper-level twinkle
+     was redundant (and stacked an extra opacity timeline on every star). */
 }
 .galaxy-star{
   position:absolute;border-radius:50%;background:#fff;
   box-shadow:0 0 4px rgba(255,255,255,.6);
   animation:star-blink var(--blink-dur,4s) ease-in-out infinite alternate;
+  will-change:opacity,transform;
 }
 .galaxy-shooter{
   position:absolute;width:2px;height:2px;background:#fff;border-radius:50%;

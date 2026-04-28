@@ -135,15 +135,28 @@ export default function Review() {
     if (!text) { toast('Write a comment first'); return; }
     if (!card) return;
     setComment('');
-    // Optimistic local push (server echoes back via card_commented event).
+    // Optimistic local push. The server's `card_commented` echo arrives a beat
+    // later with no `player_id`, so we tag this entry with a `_pendingKey` and
+    // record it in `_pendingSelfComments`. The socket handler consumes that
+    // marker on echo to avoid double-rendering self comments.
     const now = new Date();
     const time = now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0');
     const next = { ...review.comments };
     const list = next[card.id] ? next[card.id].slice() : [];
     const me = useStore.getState().me;
-    list.push({ avatar: me.avatar, handle: me.name, text, isLead: true, time });
+    const pendingKey = `${card.dbId || card.id}:${text}:${Date.now()}`;
+    list.push({ avatar: me.avatar, handle: me.name, text, isLead: true, time, _pendingKey: pendingKey });
     next[card.id] = list;
     setReview({ comments: next });
+    // Stash a self-comment marker so useRoomSocket's `card_commented` handler
+    // can drop the duplicate echo. Cleared after 30s as a safety net.
+    const pending = useStore.getState()._pendingSelfComments || {};
+    useStore.setState({
+      _pendingSelfComments: {
+        ...pending,
+        [pendingKey]: { dbId: card.dbId, text, expiresAt: Date.now() + 30000 },
+      },
+    });
     if (roomId && card.dbId) {
       api.post(`/api/cards/${card.dbId}/comment`, {
         room_id: roomId, player_id: meId, content: text,

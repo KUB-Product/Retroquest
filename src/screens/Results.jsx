@@ -1,7 +1,6 @@
 // Results + wrap-up. Pulls the leaderboard from the backend so refreshers and
 // late joiners see identical data. Excel export uses SheetJS.
 import { useEffect, useState } from 'react';
-import * as XLSX from 'xlsx';
 import { useStore } from '../store.js';
 import { api } from '../api.js';
 import { toast, launchConfetti } from '../toast.js';
@@ -95,7 +94,8 @@ export default function Results() {
     .filter((c) => !c.is_duplicate && !(review.duplicates && review.duplicates.has(c.id)))
     .sort((a, b) => b.votes - a.votes).slice(0, 3).map((c) => c.txt);
 
-  const exportExcel = () => {
+  const exportExcel = async () => {
+    const XLSX = await import('xlsx');
     const date = new Date().toLocaleDateString('th-TH');
     const wb = XLSX.utils.book_new();
 

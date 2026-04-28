@@ -7,16 +7,31 @@ export const BACKEND_URL =
     ? 'http://localhost:3001'
     : 'https://virtuous-purpose-production-42d0.up.railway.app');
 
+// 10-second client-side timeout. Without this a backend that's slow or hanging
+// (e.g. Railway cold start) would leave fetches pending forever, freezing the
+// UI on join/create with no surfaced error.
+const REQ_TIMEOUT_MS = 10000;
+
 async function call(method, path, body, headers = {}) {
-  const res = await fetch(BACKEND_URL + path, {
-    method,
-    headers: { 'Content-Type': 'application/json', ...headers },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  let json; try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
-  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
-  return json;
+  const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), REQ_TIMEOUT_MS) : null;
+  try {
+    const res = await fetch(BACKEND_URL + path, {
+      method,
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: ctrl?.signal,
+    });
+    const text = await res.text();
+    let json; try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
+    if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+    return json;
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('Request timed out');
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export const api = {
