@@ -126,8 +126,22 @@ export default function Ice() {
 
   const endIce = () => {
     toast('🎉 Ice breaker done!');
+    // Always start retro on the submit sub-phase. Reset local retro state in
+    // case stale values (e.g. phase='vote') leaked from a prior game in the
+    // same tab — without this guard the host can land directly on vote and
+    // skip card submission. Also persist retro_phase='submit' on the server
+    // so participants joining mid-phase see the correct screen.
+    const st = useStore.getState();
+    st.resetRetro();
+    st.setRetro({
+      phase: 'submit',
+      timer: cfg.retroSubmitSecs,
+      max:   cfg.retroSubmitSecs,
+    });
     if (isHost && roomId) {
-      getSocket().emit('phase_change', { room_id: roomId, phase: 'retro' });
+      const s = getSocket();
+      s.emit('phase_change', { room_id: roomId, phase: 'retro' });
+      s.emit('retro_phase_change', { room_id: roomId, retro_phase: 'submit' });
     }
     show('s-retro');
   };
