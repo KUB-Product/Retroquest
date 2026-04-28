@@ -83,20 +83,22 @@ export default function Ice() {
   }, [ice.qIdx, isHost, roomId, loading]);
 
   // Host schedules advance 4.2s after reveal; participants have a 10s failsafe.
+  // IMPORTANT: do NOT include `ice.nextScheduled` in the deps. Setting it inside
+  // the effect would re-run this effect, whose cleanup clears the very timeout
+  // we just scheduled — host got stuck on the reveal panel forever (1 Q / 1 P
+  // repro: ResultsPanel shows but auto-advance never fires).
   useEffect(() => {
-    if (!ice.resultsShown || ice.nextScheduled) return;
+    if (!ice.resultsShown) return;
     if (isHost) {
-      setIce({ nextScheduled: true });
       const t = setTimeout(() => nextQ(), 4200);
       return () => clearTimeout(t);
-    } else {
-      const t = setTimeout(() => {
-        if (useStore.getState().screen === 's-ice' && useStore.getState().ice.resultsShown) nextQ();
-      }, 10000);
-      return () => clearTimeout(t);
     }
+    const t = setTimeout(() => {
+      if (useStore.getState().screen === 's-ice' && useStore.getState().ice.resultsShown) nextQ();
+    }, 10000);
+    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ice.resultsShown, ice.nextScheduled, isHost]);
+  }, [ice.resultsShown, isHost]);
 
   const nextQ = () => {
     const st = useStore.getState();
