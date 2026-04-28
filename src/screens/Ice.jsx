@@ -83,20 +83,25 @@ export default function Ice() {
   }, [ice.qIdx, isHost, roomId, loading]);
 
   // Host schedules advance 4.2s after reveal; participants have a 10s failsafe.
+  // The visible "next-in" countdown gives the user feedback that the round
+  // didn't freeze — the previous behaviour left the question timer stuck at
+  // its last value, which read as "stuck" to players.
   // IMPORTANT: do NOT include `ice.nextScheduled` in the deps. Setting it inside
   // the effect would re-run this effect, whose cleanup clears the very timeout
   // we just scheduled — host got stuck on the reveal panel forever (1 Q / 1 P
   // repro: ResultsPanel shows but auto-advance never fires).
+  const [revealCountdown, setRevealCountdown] = useState(0);
   useEffect(() => {
-    if (!ice.resultsShown) return;
-    if (isHost) {
-      const t = setTimeout(() => nextQ(), 4200);
-      return () => clearTimeout(t);
-    }
-    const t = setTimeout(() => {
+    if (!ice.resultsShown) { setRevealCountdown(0); return; }
+    const totalSecs = isHost ? 4 : 10;
+    setRevealCountdown(totalSecs);
+    const tick = setInterval(() => {
+      setRevealCountdown((n) => Math.max(0, n - 1));
+    }, 1000);
+    const advance = setTimeout(() => {
       if (useStore.getState().screen === 's-ice' && useStore.getState().ice.resultsShown) nextQ();
-    }, 10000);
-    return () => clearTimeout(t);
+    }, totalSecs * 1000 + 200);
+    return () => { clearInterval(tick); clearTimeout(advance); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ice.resultsShown, isHost]);
 
@@ -240,8 +245,17 @@ export default function Ice() {
   if (!q) return null;
 
   const max = ice.max || cfg.iceTimerSecs || 10;
-  const ringOffset = 145 - (ice.timer / max) * 145;
-  const ringColor = ice.timer > max * 0.35 ? 'var(--y)' : 'var(--pk)';
+  // After answers are revealed the question timer is intentionally frozen
+  // (server stopped early). Swap the ring to a "next-in" countdown so the
+  // player can see we're about to advance — frozen seconds read as "stuck".
+  const revealMax = isHost ? 4 : 10;
+  const showRevealCountdown = ice.resultsShown && revealCountdown > 0;
+  const displayTimer = showRevealCountdown ? revealCountdown : ice.timer;
+  const displayMax = showRevealCountdown ? revealMax : max;
+  const ringOffset = 145 - (displayTimer / displayMax) * 145;
+  const ringColor = showRevealCountdown
+    ? 'var(--g)'
+    : (ice.timer > max * 0.35 ? 'var(--y)' : 'var(--pk)');
 
   const totalVotes = ice.answerCounts.reduce((a, b) => a + b, 0) || 1;
   const lead = players.find((p) => p.isHost);
@@ -269,7 +283,7 @@ export default function Ice() {
                   strokeDashoffset={ringOffset}
                 />
               </svg>
-              <div className="t-num">{ice.timer}</div>
+              <div className="t-num">{displayTimer}</div>
             </div>
           </div>
         </div>
@@ -277,7 +291,11 @@ export default function Ice() {
         <div className="round-pill">
           <div className="round-dot" style={{ background: 'var(--y)' }}></div>
           <span style={{ fontFamily: "'Kanit',sans-serif", fontWeight: 700, fontSize: 12 }}>Round 1 — Ice Breaker</span>
-          <span className="muted" style={{ fontSize: 11 }}>{ice.questions.length} questions</span>
+          <span className="muted" style={{ fontSize: 11 }}>
+            {showRevealCountdown
+              ? `Next in ${revealCountdown}s…`
+              : `${ice.questions.length} questions`}
+          </span>
         </div>
         <div style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <span className="muted">Question {ice.qIdx + 1} of {ice.questions.length}</span>
