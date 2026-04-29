@@ -5,7 +5,7 @@ import { getSocket } from '../socket.js';
 import { toast } from '../toast.js';
 import { api } from '../api.js';
 
-export default function HostPanel({ onAdvance, onPrevQ, onNextQ }) {
+export default function HostPanel({ onAdvance, onPrevQ, onNextQ, onBack }) {
   const isHost   = useStore((s) => s.isHost);
   const roomId   = useStore((s) => s.roomId);
   const screen   = useStore((s) => s.screen);
@@ -78,6 +78,13 @@ export default function HostPanel({ onAdvance, onPrevQ, onNextQ }) {
             title="Skip to next question"
           >Next Q →</button>
         </>
+      )}
+      {typeof onBack === 'function' && (
+        <button
+          className="btn btn-ghost btn-xs"
+          onClick={onBack}
+          title="Back to submit phase"
+        >← Back</button>
       )}
       <button className="btn btn-pk btn-xs" onClick={onAdvance}>
         {isIce ? 'End Ice →' : 'Next Phase →'}

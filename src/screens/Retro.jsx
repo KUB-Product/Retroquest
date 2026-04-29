@@ -52,10 +52,19 @@ export default function Retro() {
   }, [isHost]);
 
   // Listen for timer_end for retro phases so the host moves to vote/review.
+  // Ignore reason='phase_advance' — that's emitted by the backend's
+  // `phase_change` handler when it cleans up the previous phase's timer.
+  // During the ice → retro transition the host emits (phase_change,
+  // retro_phase_change, start_timer) in that order, but each handler awaits
+  // before running, so start_timer can finish first and create a retro_submit
+  // timer that phase_change then kills with reason=phase_advance — which
+  // previously triggered an immediate auto-flip to vote and skipped the
+  // submit phase entirely.
   useEffect(() => {
     if (!isHost || !roomId) return;
     const s = getSocket();
-    const onEnd = ({ phase }) => {
+    const onEnd = ({ phase, reason }) => {
+      if (reason === 'phase_advance') return;
       if (phase === 'retro_submit' && useStore.getState().retro.phase === 'submit') toVote();
       else if (phase === 'retro_vote' && useStore.getState().retro.phase === 'vote') endRetro();
     };
@@ -69,6 +78,18 @@ export default function Retro() {
     toast('🗳️ Voting phase! Click 👍 to upvote cards');
     if (roomId && isHost) {
       getSocket().emit('retro_phase_change', { room_id: roomId, retro_phase: 'vote' });
+    }
+  };
+
+  // Lead-only escape hatch: jump back to the submit phase from voting.
+  // Useful when the team realizes a card is missing or worded badly mid-vote.
+  // Existing votes are preserved server-side; participants follow via the
+  // retro_phase_changed broadcast.
+  const backToSubmit = () => {
+    setRetro({ phase: 'submit' });
+    toast('↩ Back to submit phase — add or edit cards');
+    if (roomId && isHost) {
+      getSocket().emit('retro_phase_change', { room_id: roomId, retro_phase: 'submit' });
     }
   };
 
@@ -312,7 +333,7 @@ export default function Retro() {
           ))}
         </div>
       </div>
-      <HostPanel onAdvance={advancePhase} />
+      <HostPanel onAdvance={advancePhase} onBack={retro.phase === 'vote' ? backToSubmit : undefined} />
     </div>
   );
 }
