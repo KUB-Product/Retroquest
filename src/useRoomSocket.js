@@ -276,6 +276,23 @@ export function useRoomSocket() {
       });
     });
 
+    on('ice_prev_q', ({ q_idx }) => {
+      const st = useStore.getState();
+      if (st.isHost) return;
+      st.setIce({
+        qIdx: q_idx,
+        resultsShown: false,
+        nextScheduled: false,
+        answered: false,
+        myPick: -1,
+        answerCounts: [0, 0, 0, 0],
+        answeredCount: 0,
+        playerPicks: {},
+        timer: st.cfg.iceTimerSecs,
+        max:   st.cfg.iceTimerSecs,
+      });
+    });
+
     on('timer_tick', ({ timer, phase, max }) => {
       const st = useStore.getState();
       if (phase === 'ice') st.setIce({ timer, max: max ?? st.ice.max });

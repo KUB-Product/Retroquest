@@ -129,6 +129,30 @@ export default function Ice() {
     }
   };
 
+  // Lead-only "back" — jumps to the previous question and re-broadcasts.
+  // Resets per-question state so the question feels fresh; backend dedupes
+  // any duplicate answers via unique(player_id, question_id).
+  const prevQ = () => {
+    const st = useStore.getState();
+    if (st.ice.qIdx <= 0) return;
+    const prevIdx = st.ice.qIdx - 1;
+    st.setIce({
+      qIdx: prevIdx,
+      resultsShown: false,
+      nextScheduled: false,
+      answered: false,
+      myPick: -1,
+      answerCounts: [0, 0, 0, 0],
+      answeredCount: 0,
+      playerPicks: {},
+      timer: st.cfg.iceTimerSecs,
+      max:   st.cfg.iceTimerSecs,
+    });
+    if (st.isHost && st.roomId) {
+      getSocket().emit('ice_prev_q', { room_id: st.roomId, q_idx: prevIdx });
+    }
+  };
+
   const endIce = () => {
     toast('🎉 Ice breaker done!');
     // Always start retro on the submit sub-phase. Reset local retro state in
@@ -231,7 +255,10 @@ export default function Ice() {
     return () => clearTimeout(t);
   }, [ice.answered, ice.resultsShown, ice.max, cfg.iceTimerSecs, isHost, setIce]);
 
-  const advancePhase = () => { nextQ(); };
+  // "End Ice →" in the host panel jumps straight to retro, regardless of
+  // which question we're on. Question-level navigation goes through the
+  // dedicated Prev Q / Next Q buttons.
+  const advancePhase = () => { endIce(); };
 
   if (loading || !ice.questions.length) {
     return (
@@ -362,7 +389,7 @@ export default function Ice() {
           </div>
         </div>
       </div>
-      <HostPanel onAdvance={advancePhase} />
+      <HostPanel onAdvance={advancePhase} onPrevQ={prevQ} onNextQ={nextQ} />
     </div>
   );
 }

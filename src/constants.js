@@ -1,3 +1,9 @@
+// Bump when the shape of anything we persist in localStorage changes — old
+// entries are dropped on first load instead of deserializing into the new code
+// path with the wrong shape (which previously surfaced as ghost players,
+// stuck phases, or wrong avatars after a deploy).
+export const APP_VERSION = '2.1.0';
+
 // Shared constants. Keep in sync with backend util/validators.js ALLOWED_AVATARS.
 //
 // Avatars are Durian the Elephant NFT IDs served from /public/nft/ as JPEGs.
