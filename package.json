@@ -1,6 +1,6 @@
 {
   "name": "retroquest",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "RetroQuest v2 — React + Vite + Socket.IO (served by the existing Retroquest-backend)",
   "private": true,
   "type": "module",

@@ -1,8 +1,31 @@
 // Per-room session tokens stored in localStorage. 4-hour TTL.
 // Enables refresh-without-losing-identity: POST /api/rooms/:id/join with the
 // stored token returns the same player row via backend dedup.
-const KEY = 'rq_session';
+//
+// Storage is version-namespaced (`rq_session_v<APP_VERSION>`) so a deploy that
+// changes the persisted shape doesn't have to defensively migrate every field —
+// older keys are swept on init and ignored.
+import { APP_VERSION } from './constants.js';
+
+const KEY_PREFIX = 'rq_session_v';
+const KEY = KEY_PREFIX + APP_VERSION;
 const TTL_MS = 4 * 60 * 60 * 1000;
+
+// One-time sweep: drop the legacy unversioned key plus any version key that
+// isn't ours. Runs at module load so the first read after a deploy doesn't
+// surface stale state. Idempotent — safe to run repeatedly.
+(function sweepLegacy() {
+  try {
+    const toRemove = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k) continue;
+      if (k === 'rq_session') { toRemove.push(k); continue; }
+      if (k.startsWith(KEY_PREFIX) && k !== KEY) toRemove.push(k);
+    }
+    for (const k of toRemove) localStorage.removeItem(k);
+  } catch {}
+})();
 
 function readAll() {
   try {

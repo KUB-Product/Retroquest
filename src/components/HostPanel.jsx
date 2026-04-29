@@ -5,17 +5,23 @@ import { getSocket } from '../socket.js';
 import { toast } from '../toast.js';
 import { api } from '../api.js';
 
-export default function HostPanel({ onAdvance }) {
+export default function HostPanel({ onAdvance, onPrevQ, onNextQ }) {
   const isHost   = useStore((s) => s.isHost);
   const roomId   = useStore((s) => s.roomId);
   const screen   = useStore((s) => s.screen);
   const roomOpen = useStore((s) => s.cfg.roomOpen);
   const retroPhase = useStore((s) => s.retro.phase);
   const submitUnlimited = useStore((s) => s.cfg.retroSubmitUnlimited);
+  const iceQIdx     = useStore((s) => s.ice.qIdx);
+  const iceQTotal   = useStore((s) => s.ice.questions.length);
 
   if (!isHost) return null;
   // No live timer running during unlimited submit → hide timer-only controls.
   const hasTimer = !(screen === 's-retro' && retroPhase === 'submit' && submitUnlimited);
+
+  const isIce     = screen === 's-ice';
+  const canPrevQ  = isIce && typeof onPrevQ === 'function' && iceQIdx > 0;
+  const canNextQ  = isIce && typeof onNextQ === 'function' && iceQIdx < iceQTotal - 1;
 
   const toggleLock = async () => {
     if (!roomId) return;
@@ -57,7 +63,25 @@ export default function HostPanel({ onAdvance }) {
       <div className="hp-divider"></div>
       {hasTimer && <button className="btn btn-ghost btn-xs" onClick={addTimer}>+30s</button>}
       {hasTimer && <button className="btn btn-ghost btn-xs" onClick={skipTimer}>⏭ Skip</button>}
-      <button className="btn btn-pk btn-xs" onClick={onAdvance}>Next Phase →</button>
+      {isIce && (
+        <>
+          <button
+            className="btn btn-ghost btn-xs"
+            onClick={onPrevQ}
+            disabled={!canPrevQ}
+            title="Back to previous question"
+          >← Prev Q</button>
+          <button
+            className="btn btn-ghost btn-xs"
+            onClick={onNextQ}
+            disabled={!canNextQ}
+            title="Skip to next question"
+          >Next Q →</button>
+        </>
+      )}
+      <button className="btn btn-pk btn-xs" onClick={onAdvance}>
+        {isIce ? 'End Ice →' : 'Next Phase →'}
+      </button>
     </div>
   );
 }
